@@ -73,6 +73,33 @@ Godot-free, plain Goxel:   goxel.exe --screen 2 --fullscreen <path to vox1.vox>
 On the LAB machine, test windows go on the laptop built-in panel only
 (`--screen 2`), never on the external monitors, and never with a console window.
 
+## Live co-editing bridge (#532 A3-P0 spike)
+
+`src/lab_bridge.c` adds an opt-in, loopback-only control channel to the running
+editor. It is a LAB adapter for a bounded feasibility proof, not an MCP server
+and not a remote-control service. Stock Goxel has no socket/rpc code at all, so
+this transport had to be written here; the separate patched `yberudev/Goxel-MCP`
+repository is a different codebase whose bridge is Unix-socket only.
+
+```sh
+# build
+export PATH=/ucrt64/bin:/usr/bin:$PATH
+LDFLAGS=-mwindows scons -j 20 mode=release werror=false
+
+# one command against a running editor that was started with GOXEL_LAB_PORT
+python amfm/scripts/labctl.py -p 47534 state
+
+# the whole bounded proof (opens and closes its own editor windows)
+bash amfm/scripts/p2_proof.sh /path/to/pd_turret.gox /path/to/StarMarineTrooper.vox
+```
+
+Commands: `ping`, `state`, `set x y z [r g b]`, `del x y z`, `undo`, `redo`,
+`help`. Edits go through the same undo history as the brush, so Ctrl+Z in the
+editor reverts them. Refused while a shape session is open or the active layer is
+a generated-shape layer. See `amfm/notes/P2-live-bridge.md` for what was proven
+and, importantly, what is **NOT TESTED** (no revision/stale-write rejection, no
+multi-step atomicity, no per-process authorization).
+
 ## What is in here
 
 * `src/slope.c`, `src/slope.h` — the surface modifier: four shape kinds
@@ -85,6 +112,11 @@ On the LAB machine, test windows go on the laptop built-in panel only
   defect fixes (headless preview render, refcounted layer replacement, a
   four-byte heap overrun in the generated mesh, a stack overrun in the handle
   drag, and a mesh leak in `slope_free`).
+* `src/lab_bridge.{c,h}` — the opt-in loopback control channel for the #532
+  A3-P0 spike (see the bridge section above), with the `slope_session_is_open()`
+  accessor in `src/slope.{c,h}` that lets it refuse to fight a shape session.
+* `amfm/scripts/` — `p2_proof.sh` (the bounded proof, PASS/FAIL per check),
+  `labctl.py` (client) and `cap_pid.ps1` (window capture by pid).
 * `notes/P0-evidence.md` — the one-slope workflow, what was proven and how.
 * `notes/P0.2-shapes.md` — bevel, cylinder and sphere on the same path.
 * `notes/P0-evidence.md` — the one-slope workflow, what was proven and how.
@@ -114,3 +146,10 @@ stack leave the heap intact and leak nothing, from a clean from-scratch build
 with no warnings in the changed files. **164 checks, 0 failed** three runs
 running, **168** with the stress phase. **Owner GUI ergonomics are NOT signed
 off** — that needs the hands-on pass on a free display.
+
+The #532 A3-P0 live-edit spike is proven on Windows: connect, one undoable edit
+seen in the viewport, undo, two-instance isolation, and the editor stays
+responsive after malformed clients. That is a transport feasibility proof and is
+explicitly **not** P2 acceptance — no scene revision check, no stale-write
+rejection, no multi-step atomicity, no per-process authorization. See
+`amfm/notes/P2-live-bridge.md`.

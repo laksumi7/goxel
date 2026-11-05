@@ -108,6 +108,10 @@ void slope_dump_layers(FILE *f);
 void slope_dump_cells(const char *path);
 void slope_ensure_art_layer(void);
 
+// True while a shape session owns the viewport handles.  The live bridge (#532
+// A3-P0) refuses to edit then, so it can never fight the manual flow.
+bool slope_session_is_open(void);
+
 // Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set, or a
 // single frame to the file named by GOXEL_SHOTS_ONCE.
 void slope_capture(void);

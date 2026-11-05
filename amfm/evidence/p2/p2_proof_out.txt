@@ -1,0 +1,88 @@
+scons rc=0  exe mtime 1793866899 -> 1793866970
+build ok, running proof
+client: python /c/projects_tools/goxel-lab/labctl.py
+=== existing goxel processes (never touched) ===
+=== launch instance A (visible, bridge 47534) ===
+lab bridge: listening on 127.0.0.1:47534 pid=28656 doc=Z:/data_art/Ref_SF/voxels/Star Marine Trooper/PD_turret/pd_turret.gox
+A pid=500
+A windows pid=28656
+--- ping ---
+pong pid=28656 port=47534 frame=34
+ok
+--- state before ---
+lab 1
+pid 28656
+port 47534
+doc Z:/data_art/Ref_SF/voxels/Star Marine Trooper/PD_turret/pd_turret.gox
+frame 43
+modified 1
+painter_mode 0
+active 'PitchAssembly' shape=0 cells=10
+selection none
+layer[0] 'Layer.1' cells=0 shape=0
+layer[1] 'PitchAssembly_barrel_L' cells=1 shape=1
+layer[2] 'PitchAssembly_barrel_R' cells=1 shape=1
+layer[3] 'YawBase' cells=1 shape=0
+layer[4] 'PitchAssembly' cells=10 shape=0 ACTIVE
+history 2
+ok
+saved C:/Users/laksu/AppData/Local/Temp/opencode/p2_1_before.png (1846x1160)
+--- one bounded edit: set 4 -4 12 ---
+set 4 -4 12 cells 10->11 history pushed
+ok
+saved C:/Users/laksu/AppData/Local/Temp/opencode/p2_2_edited.png (1846x1160)
+--- undo ---
+undo applied
+ok
+saved C:/Users/laksu/AppData/Local/Temp/opencode/p2_3_undone.png (1846x1160)
+--- state after undo ---
+state differs:
+5c5
+< frame 43
+---
+> frame 336
+15c15
+< history 2
+---
+> history 3
+--- del on an empty cell (guard) ---
+noop 4 -4 12 already empty
+--- unknown command ---
+err unknown command 'bogus'
+--- help ---
+commands: ping state set x y z [r g b] | del x y z | undo | redo | help
+ok
+=== second instance B (bridge 47535, different document) ===
+B pid=529
+lab bridge: listening on 127.0.0.1:47535 pid=11288 doc=Z:/data_art/Ref_SF/voxels/Star Marine Trooper/StarMarineTrooper.vox
+--- A and B identify separately ---
+pong pid=28656 port=47534 frame=935
+ok
+pong pid=11288 port=47535 frame=36
+ok
+pid 28656
+doc Z:/data_art/Ref_SF/voxels/Star Marine Trooper/PD_turret/pd_turret.gox
+frame 952
+pid 11288
+doc Z:/data_art/Ref_SF/voxels/Star Marine Trooper/StarMarineTrooper.vox
+--- edit B, then re-read A (no cross-talk) ---
+set 0 0 0 cells 24538->24538 history pushed
+ok
+pid 28656
+doc Z:/data_art/Ref_SF/voxels/Star Marine Trooper/PD_turret/pd_turret.gox
+frame 981
+modified 1
+=== rude clients must not stall A ===
+rude clients done
+--- A still responsive ---
+pong pid=28656 port=47534 frame=1079
+ok
+=== cleanup (only my own pids) ===
+remaining goxel:
+=== A log tail ===
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)

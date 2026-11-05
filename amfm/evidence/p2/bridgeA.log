@@ -1,0 +1,41 @@
+window: pos 3840,996 size 2560x1560
+0.000: Register script FillRandom                                   js_goxel_registerScript (src/script.c:719)
+0.000: Register script Dilate                                       js_goxel_registerScript (src/script.c:719)
+0.000: Register script VoxelSphere                                  js_goxel_registerScript (src/script.c:719)
+0.000: Loading scripts from C:\Users\laksu\AppData\Roaming\Goxel\/scripts
+ on_dir (src/script.c:922)
+0.001: Register script PD extract: YawBase / PitchAssembly          js_goxel_registerScript (src/script.c:719)
+0.038: Read settings file: C:\Users\laksu\AppData\Roaming\Goxel\/settings.ini settings_load (src/gui/settings.c:280)
+lab bridge: listening on 127.0.0.1:47534 pid=28656 doc=Z:/data_art/Ref_SF/voxels/Star Marine Trooper/PD_turret/pd_turret.gox
+0.044: OpenGL version: 4.6.0 NVIDIA 595.79                          render_init (src/render.c:309)
+0.044: OpenGL renderer: NVIDIA GeForce RTX 4080 Laptop GPU/PCIe/SSE2 render_init (src/render.c:310)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)
+lab bridge: client connected
+lab bridge: client gone (closed by client)

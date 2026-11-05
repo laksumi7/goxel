@@ -17,6 +17,7 @@
  */
 
 #include "goxel.h"
+#include "lab_bridge.h"
 #include "script.h"
 #include <getopt.h>
 
@@ -228,6 +229,9 @@ static void loop_function(void *arg)
         glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
     goxel_iter(g_inputs);
+    // AMFM #532 A3-P0: the local control channel.  Off unless GOXEL_LAB_PORT is
+    // set, and it never blocks, so a dead or rude client cannot stall editing.
+    lab_bridge_iter();
     // AMFM #534 dev affordance: GOXEL_SEL_DUMP=<file> keeps that file up to date
     // with what the Owner has selected and which layer is active, so a request
     // like "this part" can be answered from the file instead of guessing.
@@ -567,6 +571,15 @@ int main(int argc, char **argv)
             camera_turntable(cam, rz, rx);
             camera_update(cam);
         }
+    }
+
+    // AMFM #532 A3-P0: GOXEL_LAB_PORT=<port> opens a loopback-only control
+    // channel on the live editor, so an external tool can read the document and
+    // make one undoable edit without touching the mouse.
+    {
+        const char *lp = getenv("GOXEL_LAB_PORT");
+        if (lp && *lp)
+            lab_bridge_init(atoi(lp), args.input);
     }
 
     // AMFM #534: headless verification of the slope modifier invariants.

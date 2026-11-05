@@ -1440,6 +1440,13 @@ void slope_dump_layers(FILE *f)
     fflush(f);
 }
 
+// The live bridge needs to know when the viewport handles are owned by a shape
+// session, without reaching into this file's state.
+bool slope_session_is_open(void)
+{
+    return s.mode != S_MODE_NONE;
+}
+
 // Put the camera at a known orientation: Goxel's default is a top view, so
 // rx = pi/2 looks along +Y and shows the X-Z profile.
 static void set_view_box(camera_t *cam, const float box[4][4], float rz, float rx)
