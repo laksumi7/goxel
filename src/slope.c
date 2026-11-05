@@ -47,6 +47,8 @@ static struct {
     bool          dragging;
     bool          conflict;     // Voxel edits happened inside the shape region.
     tool_t       *saved_tool;  // Tool suspended while a handle is dragged.
+    layer_t      *closed;      // Shape layer whose panel was just closed.
+    layer_t      *last_active; // Layer the panel was last showing, if any.
     int           counter;
 } s = {};
 
@@ -906,6 +908,10 @@ static void resume_tool(void)
 static void end_session(void)
 {
     resume_tool();
+    // Remember which shape panel was just closed.  The active layer is still
+    // that shape layer, so without this the panel would reopen on the very next
+    // frame and Apply and Cancel would look like dead buttons.
+    s.closed = s.mod_layer;
     s.mode = S_MODE_NONE;
     s.mod_layer = NULL;
     s.src_layer = NULL;
@@ -917,20 +923,49 @@ static void end_session(void)
     }
 }
 
+// A shape layer carries a generated surface, not voxels, so staying on it after
+// a commit leaves the select and paint tools with nothing to grab.  Hand the
+// Owner back to the layer that actually holds the art.
+static void return_to_art_layer(void)
+{
+    layer_t *l, *best = NULL;
+    int best_cells = 0;
+
+    if (goxel.image->active_layer && !goxel.image->active_layer->slope &&
+            count_vol_cells(goxel.image->active_layer->volume) > 0) return;
+    // A file can carry an empty spare layer; landing on that would leave the
+    // brush painting where nothing renders, so take the layer with the voxels.
+    DL_FOREACH(goxel.image->layers, l) {
+        int n;
+        if (l->slope) continue;
+        n = count_vol_cells(l->volume);
+        if (n > best_cells) {
+            best_cells = n;
+            best = l;
+        }
+    }
+    if (best) goxel.image->active_layer = best;
+}
+
 static void cancel_session(void)
 {
     if (s.mode == S_MODE_NEW && s.src_layer && s.src_backup) {
         volume_set(s.src_layer->volume, s.src_backup);
         if (s.mod_layer) image_delete_layer(goxel.image, s.mod_layer);
+        s.mod_layer = NULL;   // gone -- never remember a deleted layer
     } else if (s.mode == S_MODE_EDIT && s.mod_layer) {
         restore_params(s.mod_layer->slope, &s.saved);
     }
     end_session();
+    return_to_art_layer();
 }
 
 static void apply_session(void)
 {
+    char name[256] = "";
+
     if (s.mod_layer) {
+        snprintf(name, sizeof(name), "%s", s.mod_layer->name);
         s.mod_layer->slope->revision++;
         region_color(s.mod_layer->volume, s.mod_layer->slope->aabb,
                      s.mod_layer->slope->color);
@@ -942,6 +977,12 @@ static void apply_session(void)
     s.conflict = false;
     end_session();
     image_history_push(goxel.image);
+    return_to_art_layer();
+    if (*name) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s applied", name);
+        goxel_add_hint(0, NULL, msg);
+    }
 }
 
 static void begin_new_shape(int kind)
@@ -1019,7 +1060,7 @@ static void begin_new_shape(int kind)
 
     region_color(mod->volume, aabb, mod->slope->color);
     save_params(&s.saved, mod->slope);
-    goxel_add_hint(0, NULL, "Drag the handle, then Apply");
+    goxel_add_hint(0, NULL, "Alt-drag the handle, then Apply (Esc cancels)");
 }
 
 static void begin_edit_slope(layer_t *layer)
@@ -1043,6 +1084,18 @@ void slope_iter(const inputs_t *inputs, const float viewport[4])
 
     slope_demo_step();
     if (!s.mode || !s.mod_layer) return;
+    {
+        // Esc hands the viewport back to ordinary voxel work.  Without this the
+        // open session keeps its handle in the way of the brush.
+        static bool esc_prev = false;
+        bool esc = inputs->keys[KEY_ESCAPE];
+        bool pressed = esc && !esc_prev;
+        esc_prev = esc;
+        if (pressed) {
+            cancel_session();
+            return;
+        }
+    }
     m = s.mod_layer->slope;
     // Watching for ordinary voxel edits inside the region: hashing a big layer
     // every frame would not be free, so this runs a few times a second.
@@ -1057,7 +1110,12 @@ void slope_iter(const inputs_t *inputs, const float viewport[4])
     dy = my - sp[1];
 
     if (!s.dragging) {
+        // Alt has to be held to grab the handle.  A plain click belongs to the
+        // brush: the handle sits right on the shape, so grabbing on any click
+        // made the paint and erase tools look dead exactly where the Owner was
+        // trying to work.
         if (inputs->touches[0].down[0] &&
+                (inputs->keys[KEY_LEFT_ALT] || inputs->keys[KEY_RIGHT_ALT]) &&
                 dx * dx + dy * dy < SLOPE_PICK_PX * SLOPE_PICK_PX) {
             s.dragging = true;
             suspend_tool();
@@ -1136,11 +1194,23 @@ void slope_gui(void)
     static const char *ANCHOR_NAMES[SLOPE_ANCHOR_COUNT] = {"Floor", "Mid", "Ceil"};
     int i;
 
+    if (active != s.last_active) {
+        // A different layer was picked, so a panel closed earlier no longer
+        // applies: picking the shape again opens it normally.
+        s.last_active = active;
+        s.closed = NULL;
+    }
     if (!s.mode && active && active->slope) {
         // Selecting a shape layer is the moment to find out whether it went
         // stale, including one that was stale before the file was saved.
         slope_refresh_stale(active);
-        begin_edit_slope(active);
+        // A session closed with Apply or Cancel stays closed until the Owner
+        // picks another layer.  Reopening it on the very next frame is what
+        // made both buttons look dead.
+        if (s.closed != active)
+            begin_edit_slope(active);
+        else
+            return;
     }
     if (!s.mode && active && !active->slope &&
             selection_aabb(aabb) && image_layer_can_edit(goxel.image, active)) {
@@ -1234,7 +1304,7 @@ void slope_gui(void)
         return;
     }
     gui_row_end();
-    gui_text("Drag the yellow handle in the view");
+    gui_text("Alt-drag the yellow handle - Esc closes this panel");
     if (s.conflict || m->stale) {
         gui_text("STALE: cells inside this region changed after the shape was");
         gui_text("applied. The surface is built from the region, so it did NOT");
@@ -1269,6 +1339,8 @@ static bool s_demo = false;
 static bool s_shape_demo = false;
 static bool s_place_demo = false;
 static bool s_edit_demo = false;
+static bool s_pd_demo = false;
+static bool s_extract = false;
 static int s_edit_reg[2][3];
 static int s_place_next = 0;
 static layer_t *s_place_last = NULL;
@@ -1298,6 +1370,74 @@ void slope_demo_begin_edits(void)
 {
     s_demo = true;
     s_edit_demo = true;
+}
+
+void slope_demo_begin_pd(void)
+{
+    s_demo = true;
+    s_pd_demo = true;
+}
+
+void slope_demo_begin_extract(void)
+{
+    s_demo = true;
+    s_extract = true;
+}
+
+void slope_ensure_art_layer(void)
+{
+    return_to_art_layer();
+}
+
+// Every occupied cell of every layer, one per line:
+//   cell <layer-index> <x> <y> <z> <colour> <layer name...>
+// Enough to rebuild a selection of the model somewhere else without guessing
+// what a screenshot looked like.
+void slope_dump_cells(const char *path)
+{
+    FILE *f = fopen(path, "w");
+    layer_t *l;
+    int i = 0;
+
+    if (!f) return;
+    DL_FOREACH(goxel.image->layers, l) {
+        volume_iterator_t iter;
+        int p[3], n = 0;
+        uint8_t c[4];
+
+        if (l->volume) {
+            iter = volume_get_iterator(l->volume,
+                                       VOLUME_ITER_VOXELS | VOLUME_ITER_SKIP_EMPTY);
+            while (volume_iter(&iter, p)) {
+                volume_get_at(l->volume, &iter, p, c);
+                if (c[3] == 0) continue;
+                fprintf(f, "cell %d %d %d %d %d %s\n", i, p[0], p[1], p[2],
+                        c[0], l->name);
+                n++;
+            }
+        }
+        fprintf(f, "# layer[%d] '%s' cells=%d shape=%d\n", i, l->name, n,
+                l->slope ? 1 : 0);
+        i++;
+    }
+    fclose(f);
+}
+
+// Which layers actually hold voxels right now.  A shape layer renders a mesh,
+// so the brush cannot take anything out of it; this is what makes Subtract look
+// dead over a generated barrel while Add keeps working on the art layer.
+void slope_dump_layers(FILE *f)
+{
+    layer_t *l;
+    int i = 0;
+
+    fprintf(f, "painter_mode %d\n", goxel.painter.mode);
+    DL_FOREACH(goxel.image->layers, l) {
+        fprintf(f, "layer[%d] '%s' cells=%d shape=%d%s\n", i++, l->name,
+                count_vol_cells(l->volume), l->slope ? 1 : 0,
+                l == goxel.image->active_layer ? " ACTIVE" : "");
+    }
+    fflush(f);
 }
 
 // Put the camera at a known orientation: Goxel's default is a top view, so
@@ -1702,6 +1842,239 @@ static void edit_step(void)
     }
 }
 
+// #### PD barrel demo (AMFM #534, PM correction 2026-11-05) #############
+// The PM correction is that a PD barrel is a rendered-surface problem, not a
+// voxel-scale redesign: generate a real sub-voxel-radius cylinder around each
+// original barrel axis, adding no cells and leaving the mount alone.  This
+// drives exactly that through the same native authoring path the Owner uses --
+// select, shape, set the parameters, apply -- once per barrel, then photographs
+// it from the front, the side, a perspective angle and at game distance.
+static void pd_step(void)
+{
+    int f = goxel.frame_count;
+    camera_t *cam = goxel.image->active_camera;
+    static int cells[8][3];
+    static int ncells = 0;
+    static int done = 0;
+    static float rise = 0.45f;
+    static int bbox[2][3];
+
+    if (f == 15) {
+        const char *spec = getenv("GOXEL_PD_CELLS") ?: "";
+        const char *r = getenv("GOXEL_PD_RISE");
+        char buf[512];
+        char *p;
+        s_demo_base = goxel.image->active_layer;
+        if (r) rise = atof(r);
+        snprintf(buf, sizeof(buf), "%s", spec);
+        p = buf;
+        while (*p && ncells < 8) {
+            int x = 0, y = 0, z = 0;
+            if (sscanf(p, "%d,%d,%d", &x, &y, &z) == 3) {
+                cells[ncells][0] = x; cells[ncells][1] = y; cells[ncells][2] = z;
+                ncells++;
+            }
+            p = strchr(p, ';');
+            if (!p) break;
+            p++;
+        }
+        volume_get_bbox(goxel_get_layers_volume(goxel.image), bbox, true);
+        printf("pd demo: %d barrel cells, rise %.3f, cells now %d\n",
+               ncells, rise, count_vol_cells(goxel_get_layers_volume(goxel.image)));
+        fflush(stdout);
+    } else if (f == 30 + done * 20 && done < ncells) {
+        // One shape per barrel: the barrel's own cell is the whole region, so
+        // nothing outside it is touched.
+        int reg[2][3];
+        reg[0][0] = reg[1][0] = cells[done][0];
+        reg[0][1] = reg[1][1] = cells[done][1];
+        reg[0][2] = reg[1][2] = cells[done][2];
+        goxel.image->active_layer = s_demo_base;
+        select_box(reg);
+        begin_new_shape(SLOPE_KIND_CYLINDER);
+        if (s.mod_layer) {
+            slope_mod_t *m = s.mod_layer->slope;
+            m->kind = SLOPE_KIND_CYLINDER;
+            m->closed = 1;              // a full barrel, not an arch
+            m->dir = SLOPE_DIR_PY;      // the barrel axis
+            m->anchor = SLOPE_ANCHOR_MID;   // centred in the cell
+            m->rise = rise;             // sub-voxel radius
+            m->revision++;
+        }
+    } else if (f == 40 + done * 20 && s.mode) {
+        apply_session();
+        done++;
+        s_demo_layer = NULL;
+        goxel.image->active_layer = s_demo_base;
+        if (goxel.image->selection_mask)
+            volume_clear(goxel.image->selection_mask);
+    } else if (f == 40 + ncells * 20 + 10) {
+        layer_t *l;
+        printf("pd demo: applied; cells now %d\n",
+               count_vol_cells(goxel_get_layers_volume(goxel.image)));
+        DL_FOREACH(goxel.image->layers, l) {
+            if (!l->slope) continue;
+            printf("  shape '%s' kind=%s closed=%d rise=%.3f\n",
+                   l->name, slope_kind_name(l->slope->kind),
+                   l->slope->closed, l->slope->rise);
+            print_shape_bounds(l->slope);
+        }
+        fflush(stdout);
+    }
+
+    // Views: close perspective, straight front, straight side, and the whole
+    // ship at the distance a compact game would actually show it.
+    if (f == 40 + ncells * 20 + 20) {
+        int a[2][3]; float box[4][4];
+        a[0][0] = 0;  a[1][0] = 9;
+        a[0][1] = -15; a[1][1] = 1;
+        a[0][2] = 4;  a[1][2] = 15;
+        bbox_from_aabb(box, a);
+        set_view_box(cam, box, 0.9f, 1.15f);
+    } else if (f == 40 + ncells * 20 + 45) {
+        int a[2][3]; float box[4][4];
+        a[0][0] = 0;  a[1][0] = 9;
+        a[0][1] = -15; a[1][1] = 1;
+        a[0][2] = 4;  a[1][2] = 15;
+        bbox_from_aabb(box, a);
+        set_view_box(cam, box, 0.f, 1.5708f);
+    } else if (f == 40 + ncells * 20 + 70) {
+        int a[2][3]; float box[4][4];
+        a[0][0] = 0;  a[1][0] = 9;
+        a[0][1] = -15; a[1][1] = 1;
+        a[0][2] = 4;  a[1][2] = 15;
+        bbox_from_aabb(box, a);
+        set_view_box(cam, box, 1.5708f, 1.5708f);
+    } else if (f == 40 + ncells * 20 + 95) {
+        set_view(cam, 0.7f, 1.05f);
+    }
+
+    if (f == 40 + ncells * 20 + 125) {
+        const char *dir = getenv("GOXEL_SHOTS");
+        char path[512];
+        if (dir && *dir) {
+            snprintf(path, sizeof(path), "%s/pd.gox", dir);
+            printf("pd demo: save %s -> %d\n", path, goxel_export_to_file(path, "gox"));
+        }
+        fflush(stdout);
+        goxel.quit = true;
+    }
+}
+
+// #### PD turret extraction (AMFM #534, Owner-directed 2026-11-05) #########
+// Copy the PD out of the ship into its own editable project.  The cell lists
+// were read out of the Owner's saved authored file, so their own voxel removals
+// are part of the result, and the ship file on disk is never modified.
+static void move_cell(layer_t *src, layer_t *dst, const int p[3])
+{
+    uint8_t c[4] = { 0, 0, 0, 0 };
+
+    volume_get_at(src->volume, NULL, p, c);
+    if (c[3] == 0) return;
+    volume_set_at(dst->volume, NULL, p, c);
+    c[3] = 0;
+    volume_set_at(src->volume, NULL, p, c);
+}
+
+static void pd_extract_step(void)
+{
+    int f = goxel.frame_count;
+    static layer_t *x_yaw, *x_pitch;
+
+    // YawBase: the single turntable cell that sits on the ship's 3x3 pad.
+    static const int yaw_cells[1][3] = { { 4, -4, 8 } };
+    // PitchAssembly: the upper body as it now stands (the Owner removed the
+    // front-centre cell) plus the white sensor ornament.
+    static const int pitch_cells[9][3] = {
+        { 3, -7, 9 }, { 5, -7, 9 }, { 3, -6, 9 }, { 4, -6, 9 }, { 5, -6, 9 },
+        { 3, -5, 9 }, { 4, -5, 9 }, { 5, -5, 9 }, { 4, -4, 9 }
+    };
+    static const int sensor_cell[3] = { 4, -5, 10 };
+
+    if (f == 15) {
+        layer_t *art = NULL, *l, *kill[8];
+        int nkill = 0, i;
+
+        printf("extract: building\n");
+        fflush(stdout);
+
+        DL_FOREACH(goxel.image->layers, l)
+            if (!l->slope && (!art ||
+                    count_vol_cells(l->volume) > count_vol_cells(art->volume)))
+                art = l;
+        if (!art) { goxel.quit = true; return; }
+
+        {
+            x_yaw = layer_new("YawBase");
+            x_pitch = layer_new("PitchAssembly");
+            image_add_layer(goxel.image, x_yaw);
+            image_add_layer(goxel.image, x_pitch);
+            for (i = 0; i < 1; i++) move_cell(art, x_yaw, yaw_cells[i]);
+            for (i = 0; i < 9; i++) move_cell(art, x_pitch, pitch_cells[i]);
+            move_cell(art, x_pitch, sensor_cell);
+            vec4_copy(x_yaw->color, art->color);
+            vec4_copy(x_pitch->color, art->color);
+        }
+        // The ship itself does not belong in the extract; only the turret cells
+        // that were just moved out do.
+        volume_clear(art->volume);
+
+        // The ship and its 3x3 hardpoint pad stay ship-side: the extract holds
+        // the turret only.  Then drop the empty layers a save had left behind.
+        DL_FOREACH(goxel.image->layers, l) {
+            if (!l->slope && count_vol_cells(l->volume) == 0 && nkill < 8)
+                kill[nkill++] = l;
+        }
+        for (i = 0; i < nkill; i++) image_delete_layer(goxel.image, kill[i]);
+        // Never leave the active layer pointing at one that was just deleted.
+        goxel.image->active_layer = x_pitch;
+
+        // Name the two generated barrels as part of the pitching group.
+        i = 0;
+        DL_FOREACH(goxel.image->layers, l) {
+            if (!l->slope) continue;
+            snprintf(l->name, sizeof(l->name),
+                     i++ == 0 ? "PitchAssembly_barrel_L"
+                              : "PitchAssembly_barrel_R");
+        }
+    } else if (f == 30) {
+        const char *dir = getenv("GOXEL_PD_EXTRACT") ?: "";
+        const char *keep = getenv("GOXEL_PD_KEEP");
+        char path[512];
+
+        if (*dir) {
+            if (!keep || !strcmp(keep, "all")) {
+                snprintf(path, sizeof(path), "%s/pd_turret.gox", dir);
+                printf("extract: writing gox %s\n", path);
+                fflush(stdout);
+                printf("extract: gox -> %d\n", goxel_export_to_file(path, "gox"));
+                snprintf(path, sizeof(path), "%s/pd_turret.vox", dir);
+                printf("extract: writing vox %s\n", path);
+                fflush(stdout);
+                printf("extract: vox -> %d\n", goxel_export_to_file(path, "vox"));
+            } else {
+                layer_t *l, *kill[8];
+                int nkill = 0, i;
+                bool want_yaw = (*keep == 'y');
+                DL_FOREACH(goxel.image->layers, l) {
+                    bool is_yaw = l->name && !strcmp(l->name, "YawBase");
+                    if (l->slope || (want_yaw ? !is_yaw : is_yaw))
+                        if (nkill < 8) kill[nkill++] = l;
+                }
+                for (i = 0; i < nkill; i++) image_delete_layer(goxel.image, kill[i]);
+                goxel.image->active_layer = want_yaw ? x_yaw : x_pitch;
+                snprintf(path, sizeof(path), "%s/pd_%s.vox", dir, keep);
+                printf("extract: vox %s -> %d\n", path,
+                       goxel_export_to_file(path, "vox"));
+            }
+        }
+        printf("extract: layers now\n");
+        slope_dump_layers(stdout);
+        fflush(stdout);
+        goxel.quit = true;
+    }
+}
+
 static void slope_demo_step(void)
 {
     int aabb[2][3];
@@ -1709,6 +2082,14 @@ static void slope_demo_step(void)
     camera_t *cam = goxel.image->active_camera;
 
     if (!s_demo) return;
+    if (s_extract) {
+        pd_extract_step();
+        return;
+    }
+    if (s_pd_demo) {
+        pd_step();
+        return;
+    }
     if (s_edit_demo) {
         edit_step();
         return;
@@ -1818,12 +2199,15 @@ void slope_capture(void)
     static const int AT_SHAPES[] = {80, 170, 260, 350};
     static const int AT_PLACE[] = {105, 195, 285, 375, 465, 510};
     static const int AT_EDIT[] = {70, 100, 125, 150};
+    static const int AT_PD[] = {115, 140, 165, 190};
     static const char *dir = NULL;
     static int idx = 0;
     static const char *once = NULL;
-    const int *at = s_edit_demo ? AT_EDIT : s_place_demo ? AT_PLACE
+    const int *at = s_pd_demo ? AT_PD : s_edit_demo ? AT_EDIT
+                        : s_place_demo ? AT_PLACE
                                  : s_shape_demo ? AT_SHAPES : AT;
-    int nb = s_edit_demo ? (int)(sizeof(AT_EDIT) / sizeof(AT_EDIT[0]))
+    int nb = s_pd_demo ? (int)(sizeof(AT_PD) / sizeof(AT_PD[0]))
+           : s_edit_demo ? (int)(sizeof(AT_EDIT) / sizeof(AT_EDIT[0]))
            : s_place_demo ? (int)(sizeof(AT_PLACE) / sizeof(AT_PLACE[0]))
            : s_shape_demo ? (int)(sizeof(AT_SHAPES) / sizeof(AT_SHAPES[0]))
                           : (int)(sizeof(AT) / sizeof(AT[0]));
@@ -1841,7 +2225,9 @@ void slope_capture(void)
     if (!*dir || idx >= nb) return;
     if (goxel.frame_count < at[idx]) return;
 
-    if (s_edit_demo)
+    if (s_pd_demo)
+        snprintf(path, sizeof(path), "%s/pd%d.png", dir, idx);
+    else if (s_edit_demo)
         snprintf(path, sizeof(path), "%s/edit%d.png", dir, idx);
     else if (s_place_demo)
         snprintf(path, sizeof(path), "%s/place%d.png", dir, idx);
@@ -1857,7 +2243,8 @@ void slope_capture(void)
     // Once every requested frame is on disk there is nothing left to show.
     // The shapes and placement demos keep running so they can write their
     // document out first.
-    if (idx >= nb && !s_shape_demo && !s_place_demo && !s_edit_demo) goxel.quit = true;
+    if (idx >= nb && !s_shape_demo && !s_place_demo && !s_edit_demo &&
+            !s_pd_demo) goxel.quit = true;
 }
 
 // #### Headless self test ###############################################

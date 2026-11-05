@@ -16,6 +16,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <stdio.h>
+
 typedef struct layer layer_t;
 typedef struct inputs inputs_t;
 
@@ -100,6 +102,11 @@ void slope_demo_begin(void);
 void slope_demo_begin_shapes(void);
 void slope_demo_begin_placement(void);
 void slope_demo_begin_edits(void);
+void slope_demo_begin_pd(void);
+void slope_demo_begin_extract(void);
+void slope_dump_layers(FILE *f);
+void slope_dump_cells(const char *path);
+void slope_ensure_art_layer(void);
 
 // Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set, or a
 // single frame to the file named by GOXEL_SHOTS_ONCE.

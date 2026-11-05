@@ -517,6 +517,29 @@ static int alert_popup(void *data)
     return gui_button(_("OK"), 0, 0);
 }
 
+// A shortcut name such as "Delete" is a key name, not the letter D. The old
+// code looked only at s[0], so pressing D ran the "Delete" action and wiped the
+// active layer -- with no undo for it. Named keys are resolved properly here.
+static int named_key_to_imgui(const char *s)
+{
+    if (!strcmp(s, "Delete"))   return ImGuiKey_Delete;
+    if (!strcmp(s, "Escape"))   return ImGuiKey_Escape;
+    if (!strcmp(s, "Enter"))    return ImGuiKey_Enter;
+    if (!strcmp(s, "Space"))    return ImGuiKey_Space;
+    if (!strcmp(s, "Tab"))      return ImGuiKey_Tab;
+    if (!strcmp(s, "Insert"))   return ImGuiKey_Insert;
+    if (!strcmp(s, "Home"))     return ImGuiKey_Home;
+    if (!strcmp(s, "End"))      return ImGuiKey_End;
+    if (!strcmp(s, "PageUp"))   return ImGuiKey_PageUp;
+    if (!strcmp(s, "PageDown")) return ImGuiKey_PageDown;
+    if (s[0] == 'F') {
+        int n = atoi(s + 1);
+        if (n >= 1 && n <= 12)
+            return ImGuiKey_F1 + (n - 1);
+    }
+    return -1;
+}
+
 static int check_action_shortcut(action_t *action, void *user)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -539,6 +562,17 @@ static int check_action_shortcut(action_t *action, void *user)
 
     if (str_startswith(s, "Ctrl")) return 0;
     if (str_startswith(s, "Shift")) return 0;
+
+    {
+        int named = named_key_to_imgui(s);
+        if (named >= 0) {
+            if (ImGui::IsKeyPressed((ImGuiKey)named, false)) {
+                action_exec(action);
+                return 1;
+            }
+            return 0;
+        }
+    }
 
     if (    (check_char && isCharPressed(s[0])) ||
             (check_key && ImGui::IsKeyPressed((ImGuiKey)s[0], false))) {

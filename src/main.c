@@ -53,9 +53,22 @@ void on_drop(GLFWwindow* win, int count, const char** paths)
         goxel_import_file(paths[i], NULL);
 }
 
+// AMFM #534: Escape must stay usable for cancelling menus and popups, but it
+// must not be able to take the window down.  If a close request arrives while
+// Escape is held, it is dropped and logged; the title-bar button and Ctrl+Q
+// still go through normally.
+static bool s_esc_held = false;
+
 void on_close(GLFWwindow *win)
 {
     glfwSetWindowShouldClose(win, GLFW_FALSE);
+    if (s_esc_held) {
+        printf("close request ignored: Escape was held\n");
+        fflush(stdout);
+        return;
+    }
+    printf("close request accepted (unsaved changes decide the dialog)\n");
+    fflush(stdout);
     gui_query_quit();
 }
 
@@ -201,6 +214,7 @@ static void loop_function(void *arg)
     for (i = GLFW_KEY_SPACE; i <= GLFW_KEY_LAST; i++) {
         g_inputs->keys[i] = glfwGetKey(window, i) == GLFW_PRESS;
     }
+    s_esc_held = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     glfwGetCursorPos(window, &xpos, &ypos);
     xpos *= (float)g_inputs->window_size[0] / win_size[0];
     ypos *= (float)g_inputs->window_size[1] / win_size[1];
@@ -214,6 +228,43 @@ static void loop_function(void *arg)
         glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
     goxel_iter(g_inputs);
+    // AMFM #534 dev affordance: GOXEL_SEL_DUMP=<file> keeps that file up to date
+    // with what the Owner has selected and which layer is active, so a request
+    // like "this part" can be answered from the file instead of guessing.
+    {
+        static int s_sel_tick = 0;
+        const char *dump = getenv("GOXEL_SEL_DUMP");
+        if (dump && *dump && (s_sel_tick++ % 20) == 0) {
+            FILE *f = fopen(dump, "w");
+            if (f) {
+                int aabb[2][3] = {{0, 0, 0}, {0, 0, 0}};
+                bool has = goxel.image->selection_mask &&
+                           volume_get_bbox(goxel.image->selection_mask, aabb, true);
+                if (has)
+                    fprintf(f, "selection %d %d %d %d %d %d\n",
+                            aabb[0][0], aabb[0][1], aabb[0][2],
+                            aabb[1][0], aabb[1][1], aabb[1][2]);
+                else
+                    fprintf(f, "selection none\n");
+                if (goxel.image->active_layer) {
+                    int lb[2][3] = {{0, 0, 0}, {0, 0, 0}};
+                    fprintf(f, "layer %s\n", goxel.image->active_layer->name);
+                    // The layer's own extent pins down the world<->file offset,
+                    // so a selection can be mapped back to the source file.
+                    if (volume_get_bbox(goxel.image->active_layer->volume, lb, true))
+                        fprintf(f, "layerbox %d %d %d %d %d %d\n",
+                                lb[0][0], lb[0][1], lb[0][2],
+                                lb[1][0], lb[1][1], lb[1][2]);
+                }
+                slope_dump_layers(f);
+                {
+                    const char *cd = getenv("GOXEL_CELL_DUMP");
+                    if (cd && *cd) slope_dump_cells(cd);
+                }
+                fclose(f);
+            }
+        }
+    }
     goxel_render(g_inputs);
 
     memset(g_inputs, 0, sizeof(*g_inputs));
@@ -392,9 +443,37 @@ int main(int argc, char **argv)
     glfwWindowHint(GLFW_SAMPLES, 4);
     glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
 
+    // AMFM #534 dev affordance: GOXEL_FULLSCREEN_AT=x,y puts a normal, decorated
+    // window on the monitor whose top-left corner is (x,y) and maximises it
+    // there. Deliberately not exclusive fullscreen: an exclusive mode has no
+    // window chrome, so the Owner cannot move, minimise or switch away from it.
+    window = NULL;
+    {
+        const char *fs = getenv("GOXEL_FULLSCREEN_AT");
+        if (fs) {
+            int count = 0, fx = 0, fy = 0, i;
+            GLFWmonitor **mons = glfwGetMonitors(&count);
+            sscanf(fs, "%d,%d", &fx, &fy);
+            for (i = 0; i < count; i++) {
+                int mx = 0, my = 0;
+                glfwGetMonitorPos(mons[i], &mx, &my);
+                if (mx == fx && my == fy) {
+                    window = glfwCreateWindow(1280, 800, "Goxel", NULL, NULL);
+                    if (window) {
+                        glfwSetWindowPos(window, mx, my);
+                        glfwMaximizeWindow(window);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     // Is there a clean way to create a maximized window
     // that works both on Windows, Mac and Linux?
-    if (!DEFINED(WIN32)) {
+    if (window) {
+        // already created fullscreen on the pinned monitor
+    } else if (!DEFINED(WIN32)) {
         monitor = glfwGetPrimaryMonitor();
         mode = glfwGetVideoMode(monitor);
         if (mode) {
@@ -426,6 +505,15 @@ int main(int argc, char **argv)
     }
 
     sys_callbacks.user = window;
+    {
+        // Say where the window actually landed: the review window has to be on a
+        // specific physical panel, and guessing from a screenshot is not proof.
+        int wx = 0, wy = 0, ww = 0, wh = 0;
+        glfwGetWindowPos(window, &wx, &wy);
+        glfwGetWindowSize(window, &ww, &wh);
+        printf("window: pos %d,%d size %dx%d\n", wx, wy, ww, wh);
+        fflush(stdout);
+    }
     glfwMakeContextCurrent(window);
     if (!DEFINED(EMSCRIPTEN))
         glfwSetScrollCallback(window, on_scroll);
@@ -450,8 +538,36 @@ int main(int argc, char **argv)
         tests_run();
     }
 
-    if (args.input)
+    if (args.input) {
         goxel_import_file(args.input, NULL);
+        // A saved file can come back with a shape layer selected, and the brush
+        // only ever edits the active layer: Subtract would have nothing to take
+        // away and look broken.  Start on the layer that holds the voxels.
+        slope_ensure_art_layer();
+    }
+
+    // AMFM #534 dev affordance: GOXEL_FRAME=x0,y0,z0,x1,y1,z1 frames the camera
+    // on that box, and GOXEL_FRAME_ROT=rz,rx turns to look at it. A whole ship
+    // is too big to judge one fitting from, so a review shot needs to zoom.
+    {
+        const char *fr = getenv("GOXEL_FRAME");
+        if (fr && goxel.image) {
+            int aabb[2][3] = {{0, 0, 0}, {1, 1, 1}};
+            float fbox[4][4];
+            camera_t *cam = goxel.image->active_camera;
+            float rz = 0.7f, rx = 1.05f;
+            const char *rot = getenv("GOXEL_FRAME_ROT");
+            sscanf(fr, "%d,%d,%d,%d,%d,%d", &aabb[0][0], &aabb[0][1], &aabb[0][2],
+                   &aabb[1][0], &aabb[1][1], &aabb[1][2]);
+            if (rot)
+                sscanf(rot, "%f,%f", &rz, &rx);
+            bbox_from_aabb(fbox, aabb);
+            mat4_set_identity(cam->mat);
+            camera_fit_box(cam, fbox);
+            camera_turntable(cam, rz, rx);
+            camera_update(cam);
+        }
+    }
 
     // AMFM #534: headless verification of the slope modifier invariants.
     if (getenv("GOXEL_SELFTEST")) {
@@ -468,6 +584,10 @@ int main(int argc, char **argv)
         slope_demo_begin_placement();
     if (getenv("GOXEL_EDIT_DEMO"))
         slope_demo_begin_edits();
+    if (getenv("GOXEL_PD_DEMO"))
+        slope_demo_begin_pd();
+    if (getenv("GOXEL_PD_EXTRACT"))
+        slope_demo_begin_extract();
 
     if (args.script) {
         script_run_from_file(args.script, args.script_args_nb, args.script_args);
