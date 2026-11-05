@@ -1,11 +1,11 @@
 /* Goxel 3D voxels editor
  *
- * AMFM #534 LAB: selective, non-destructive planar slope surface modifier.
+ * AMFM #534 LAB: selective, non-destructive surface shape modifier.
  *
- * A slope modifier is attached to a layer.  The layer keeps the underlying
- * voxel occupancy (the source cells) but its cube geometry is replaced by a
- * generated planar surface, so neighbouring layers keep their ordinary blocky
- * voxels untouched.
+ * A modifier is attached to a layer.  The layer keeps the underlying voxel
+ * occupancy (the source cells) but its cube geometry is replaced by a
+ * generated surface, so neighbouring layers keep their ordinary blocky voxels
+ * untouched.
  */
 
 #ifndef SLOPE_H
@@ -19,7 +19,7 @@
 typedef struct layer layer_t;
 typedef struct inputs inputs_t;
 
-// Goxel is Z-up: the slope runs along X or Y and rises along Z.
+// Goxel is Z-up: the surface runs along X or Y and rises along Z.
 enum {
     SLOPE_DIR_PX = 0,
     SLOPE_DIR_NX,
@@ -28,10 +28,21 @@ enum {
     SLOPE_DIR_COUNT,
 };
 
+// The generated surface kinds.  Every kind stands on the region's bottom
+// plane, so a shape can never dip under the model it was made from.
+enum {
+    SLOPE_KIND_SLOPE = 0,
+    SLOPE_KIND_BEVEL,
+    SLOPE_KIND_CYLINDER,
+    SLOPE_KIND_SPHERE,
+    SLOPE_KIND_COUNT,
+};
+
 typedef struct slope_mod {
     int      aabb[2][3];  // Inclusive source-cell region replaced by the surface.
-    int      dir;         // SLOPE_DIR_*: horizontal direction the surface rises to.
-    float    rise;        // Height delta, in voxels, between the low and high edge.
+    int      kind;        // SLOPE_KIND_*
+    int      dir;         // SLOPE_DIR_*: axis the surface is built along.
+    float    rise;        // Height of the surface above the region bottom, in voxels.
     uint32_t revision;
     uint8_t  color[4];    // Surface colour (sampled from the source cells).
     // Transient render cache: not copied, not hashed.
@@ -46,6 +57,9 @@ uint32_t     slope_hash(const slope_mod_t *mod);
 
 // True when the layer's cube geometry is replaced by a generated surface.
 bool slope_replaces_voxels(const layer_t *layer);
+
+// Display name of a SLOPE_KIND_* value.
+const char *slope_kind_name(int kind);
 
 // Frame update for the viewport handles.  Must run before the tools so that
 // dragging a handle never paints voxels.
@@ -64,13 +78,12 @@ void slope_gui(void);
 void slope_selftest(void);
 
 // Drive the modifier through the normal editor path for screenshots
-// (GOXEL_SLOPE_DEMO=1).
+// (GOXEL_SLOPE_DEMO=1), or every shape kind in turn (GOXEL_SHAPE_DEMO=1).
 void slope_demo_begin(void);
+void slope_demo_begin_shapes(void);
 
-// Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set.
-void slope_capture(void);
-
-// Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set.
+// Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set, or a
+// single frame to the file named by GOXEL_SHOTS_ONCE.
 void slope_capture(void);
 
 #endif // SLOPE_H

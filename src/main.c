@@ -462,6 +462,8 @@ int main(int argc, char **argv)
     // AMFM #534: drive the modifier in the running editor for review shots.
     if (getenv("GOXEL_SLOPE_DEMO"))
         slope_demo_begin();
+    if (getenv("GOXEL_SHAPE_DEMO"))
+        slope_demo_begin_shapes();
 
     if (args.script) {
         script_run_from_file(args.script, args.script_args_nb, args.script_args);
