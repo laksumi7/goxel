@@ -54,6 +54,9 @@ GOXEL_HEADLESS=1 GOXEL_SHAPE_DEMO=1 GOXEL_SHOTS=/tmp/shots ./goxel.exe /path/to/
 # the placement/orientation matrix, with per-shape mesh bounds in the log
 GOXEL_HEADLESS=1 GOXEL_PLACE_DEMO=1 GOXEL_SHOTS=/tmp/shots ./goxel.exe /path/to/vox1.vox
 
+# one inside-region deletion and one recolour, before/after, plus the resolve
+GOXEL_HEADLESS=1 GOXEL_EDIT_DEMO=1 GOXEL_SHOTS=/tmp/shots ./goxel.exe /path/to/vox1.vox
+
 # a fresh process opens the saved document back
 GOXEL_HEADLESS=1 GOXEL_SHOTS_ONCE=/tmp/shots/reopened.png ./goxel.exe /tmp/shots/reopen.gox
 ```
@@ -84,20 +87,30 @@ On the LAB machine, test windows go on the laptop built-in panel only
   drag, and a mesh leak in `slope_free`).
 * `notes/P0-evidence.md` — the one-slope workflow, what was proven and how.
 * `notes/P0.2-shapes.md` — bevel, cylinder and sphere on the same path.
+* `notes/P0-evidence.md` — the one-slope workflow, what was proven and how.
+* `notes/P0.2-shapes.md` — bevel, cylinder and sphere on the same path.
 * `notes/P0.3-placement.md` — anchor planes and open/closed forms, edits inside a
   shape region, and the stress run.
+* `notes/P0.4-inside-region-edits.md` — edited cells vs the visible surface: the
+  limitation stated honestly, the stale state and its two resolutions.
 * `evidence/` — self test log, demo log, rendered frames and the saved
   documents. `evidence/shapes/` holds the four-shape run,
-  `evidence/placement/` the placement matrix, `evidence/stress/` the stress run.
+  `evidence/placement/` the placement matrix, `evidence/edits/` the
+  inside-region before/after pair, `evidence/stress/` the stress runs,
+  `evidence/clean_build.log` the from-scratch build.
 
 ## Status
 
 P0.0 (pin + real asset opens), P0.1 (one selective planar slope, end to end)
 and the mandatory editable save/reopen are demonstrated headlessly; Bevel,
-Cylinder and Sphere run through the same selective path; shapes are no longer
+Cylinder and Sphere run through the same selective path; shapes are not
 upward-only (floor/mid/ceil anchors, open and closed forms) and were verified
-numerically on the real ship; voxel edits inside a shape region are reported
-rather than silently dropped; and 120 stress cycles over 2,880 generated meshes
-plus the undo stack leave the heap intact and leak nothing. **160 checks, 0
-failed** three runs running, **164** with the stress phase. **Owner GUI
-ergonomics are NOT signed off** — that needs the hands-on pass on a free display.
+numerically on the real ship. A voxel edit inside a shape's region does **not**
+change the generated surface — that is a real limitation of a region-derived
+surface and is recorded as one — but it now flags the surface as stale in the
+viewport and offers Accept edits / Restore cells, demonstrated before and after
+on the real ship. 120 stress cycles over 2,880 generated meshes plus the undo
+stack leave the heap intact and leak nothing, from a clean from-scratch build
+with no warnings in the changed files. **164 checks, 0 failed** three runs
+running, **168** with the stress phase. **Owner GUI ergonomics are NOT signed
+off** — that needs the hands-on pass on a free display.

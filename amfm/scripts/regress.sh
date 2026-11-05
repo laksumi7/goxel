@@ -51,6 +51,16 @@ GOXEL_HEADLESS=1 GOXEL_SHOTS_ONCE=$LAB/evidence/placement/reopened_placement.png
   ./goxel/goxel.exe evidence/placement/placement.gox > evidence/placement/reopen_placement.log 2>&1
 echo "placement reopen exit=$?"
 
+rm -f evidence/edits/edit*.png evidence/edits/edits.gox
+mkdir -p evidence/edits
+GOXEL_HEADLESS=1 GOXEL_EDIT_DEMO=1 GOXEL_SHOTS=$LAB/evidence/edits \
+  ./goxel/goxel.exe assets/vox1.vox > evidence/edits/edits_demo.log 2>&1
+echo "inside-region edits demo exit=$?"
+grep -E 'edit demo' evidence/edits/edits_demo.log
+GOXEL_HEADLESS=1 GOXEL_SHOTS_ONCE=$LAB/evidence/edits/reopened_edits.png \
+  ./goxel/goxel.exe evidence/edits/edits.gox > evidence/edits/reopen_edits.log 2>&1
+echo "edits reopen exit=$?"
+
 echo "--- summary ---"
 for f in evidence/shapes/selftest_run1.log evidence/shapes/selftest_run2.log \
          evidence/shapes/selftest_run3.log evidence/stress/stress.log; do

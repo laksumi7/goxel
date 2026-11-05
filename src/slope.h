@@ -59,6 +59,8 @@ typedef struct slope_mod {
     uint32_t revision;
     uint32_t applied_hash;  // Cells of this layer inside the region when the
                             // shape was applied; edits after that are a conflict.
+                            // Persisted, so a stale shape stays stale across save.
+    int      stale;         // Derived: applied_hash no longer matches the cells.
     uint8_t  color[4];    // Surface colour (sampled from the source cells).
     // Transient render cache: not copied, not hashed.
     model3d_t *mesh;
@@ -97,6 +99,7 @@ void slope_selftest(void);
 void slope_demo_begin(void);
 void slope_demo_begin_shapes(void);
 void slope_demo_begin_placement(void);
+void slope_demo_begin_edits(void);
 
 // Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set, or a
 // single frame to the file named by GOXEL_SHOTS_ONCE.

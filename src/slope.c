@@ -479,19 +479,30 @@ static void build_cylinder(const surf_frame_t *f, model3d_t *mo, int *vi)
         add_quad(mo, vi, q, out);
     }
 
-    // the two ends, as fans from the section's pivot
-    vec3_set(pivot, 0, 0, 0);
-    pivot[f->run] = r_a;
-    pivot[f->cross] = c_mid;
-    pivot[SLOPE_UP] = zc;
-    vec3_set(out, 0, 0, 0); out[f->run] = -1;
-    for (k = 0; k < seg; k++)
-        add_tri(mo, vi, pivot, arc[k], arc[k+1], out);
+    // the two ends, as fans from the section's pivot.  The arc points are built
+    // at run 0 as a placeholder, so each rim vertex has to be moved out to the
+    // end it closes; using them raw would skew the cap into the region.
+    {
+        float va[3], vb[3];
+        vec3_set(pivot, 0, 0, 0);
+        pivot[f->run] = r_a;
+        pivot[f->cross] = c_mid;
+        pivot[SLOPE_UP] = zc;
+        vec3_set(out, 0, 0, 0); out[f->run] = -1;
+        for (k = 0; k < seg; k++) {
+            vec3_copy(arc[k], va);       va[f->run] = r_a;
+            vec3_copy(arc[k + 1], vb);   vb[f->run] = r_a;
+            add_tri(mo, vi, pivot, va, vb, out);
+        }
 
-    pivot[f->run] = r_b;
-    vec3_set(out, 0, 0, 0); out[f->run] = 1;
-    for (k = 0; k < seg; k++)
-        add_tri(mo, vi, pivot, arc[k], arc[k+1], out);
+        pivot[f->run] = r_b;
+        vec3_set(out, 0, 0, 0); out[f->run] = 1;
+        for (k = 0; k < seg; k++) {
+            vec3_copy(arc[k], va);       va[f->run] = r_b;
+            vec3_copy(arc[k + 1], vb);   vb[f->run] = r_b;
+            add_tri(mo, vi, pivot, va, vb, out);
+        }
+    }
 
     // a full barrel is already closed; an arch needs its cap
     if (!full)
@@ -685,18 +696,23 @@ static uint32_t cells_hash_in_region(const layer_t *layer, const int aabb[2][3])
     return key;
 }
 
-// True when a shape's own layer no longer holds the cells it held when the
-// shape was applied.
-static bool slope_conflict(const layer_t *layer)
+// Recompute whether a shape's own layer still holds the cells it was applied
+// against, and record the answer on the modifier so the viewport and the strip
+// can both show it.  A shape is stale when the cells inside its region changed
+// after it was applied: the generated surface cannot follow individual cells,
+// so the surface is now the stale thing and has to say so.
+static bool slope_refresh_stale(layer_t *layer)
 {
     uint32_t h;
     if (!layer || !layer->slope) return false;
     h = cells_hash_in_region(layer, layer->slope->aabb);
     if (layer->slope->applied_hash == 0) {
-        ((slope_mod_t *)layer->slope)->applied_hash = h;
+        layer->slope->applied_hash = h;
+        layer->slope->stale = 0;
         return false;
     }
-    return h != layer->slope->applied_hash;
+    layer->slope->stale = (h != layer->slope->applied_hash) ? 1 : 0;
+    return layer->slope->stale != 0;
 }
 
 static void ensure_mesh(layer_t *layer)
@@ -739,6 +755,14 @@ void slope_render(void)
             col[0] = (col[0] + 255) / 2;
             col[1] = (col[1] + 190) / 2;
             col[2] = col[2] / 3;
+        } else if (layer->slope->stale) {
+            // The cells this surface was built from changed underneath it.  The
+            // surface cannot follow individual cells, so it has to look stale in
+            // the view and not merely say so in a strip the Owner may not have
+            // open: magenta, clearly neither the hull nor the live preview.
+            col[0] = (col[0] + 255) / 2;
+            col[1] = col[1] / 4;
+            col[2] = (col[2] + 230) / 2;
         }
         model3d_render(layer->slope->mesh, layer->mat,
                        goxel.rend.view_mat, goxel.rend.proj_mat,
@@ -1023,7 +1047,7 @@ void slope_iter(const inputs_t *inputs, const float viewport[4])
     // Watching for ordinary voxel edits inside the region: hashing a big layer
     // every frame would not be free, so this runs a few times a second.
     if (goxel.frame_count % 20 == 0)
-        s.conflict = slope_conflict(s.mod_layer);
+        s.conflict = slope_refresh_stale(s.mod_layer);
     handle_pos(m, h);
     camera_project(goxel.image->active_camera, h, viewport, sp);
     mx = inputs->touches[0].pos[0];
@@ -1091,6 +1115,17 @@ static void strip_position(const slope_mod_t *m, float out[2])
                    goxel.screen_size[1] - 20.f);
 }
 
+// Drop a shape from a layer.  The cells it was made from are still on this
+// layer, so removing the modifier turns them straight back into ordinary
+// voxels: the original geometry comes back and nothing is thrown away.
+static void slope_clear_layer(layer_t *layer)
+{
+    if (!layer || !layer->slope) return;
+    slope_free(layer->slope);
+    layer->slope = NULL;
+    image_history_push(goxel.image);
+}
+
 void slope_gui(void)
 {
     layer_t *active = goxel.image->active_layer;
@@ -1101,7 +1136,12 @@ void slope_gui(void)
     static const char *ANCHOR_NAMES[SLOPE_ANCHOR_COUNT] = {"Floor", "Mid", "Ceil"};
     int i;
 
-    if (!s.mode && active && active->slope) begin_edit_slope(active);
+    if (!s.mode && active && active->slope) {
+        // Selecting a shape layer is the moment to find out whether it went
+        // stale, including one that was stale before the file was saved.
+        slope_refresh_stale(active);
+        begin_edit_slope(active);
+    }
     if (!s.mode && active && !active->slope &&
             selection_aabb(aabb) && image_layer_can_edit(goxel.image, active)) {
         // Offer the operations next to the current selection.
@@ -1195,9 +1235,27 @@ void slope_gui(void)
     }
     gui_row_end();
     gui_text("Drag the yellow handle in the view");
-    if (s.conflict)
-        gui_text("Cells inside this region changed after the shape was applied;"
-                 " the surface follows the region, not those cells");
+    if (s.conflict || m->stale) {
+        gui_text("STALE: cells inside this region changed after the shape was");
+        gui_text("applied. The surface is built from the region, so it did NOT");
+        gui_text("change to match them. Resolve it one way or the other:");
+        gui_row_begin(2);
+        if (gui_button("Accept edits", 0, 0)) {
+            // Keep the surface and take the cells as they now are.
+            m->applied_hash = cells_hash_in_region(s.mod_layer, m->aabb);
+            m->stale = 0;
+            s.conflict = false;
+        }
+        if (gui_button("Restore cells", 0, 0)) {
+            // Throw the surface away; the source cells become voxels again.
+            layer_t *l = s.mod_layer;
+            end_session();
+            slope_clear_layer(l);
+            gui_window_end();
+            return;
+        }
+        gui_row_end();
+    }
     gui_window_end();
 }
 
@@ -1210,6 +1268,8 @@ void slope_gui(void)
 static bool s_demo = false;
 static bool s_shape_demo = false;
 static bool s_place_demo = false;
+static bool s_edit_demo = false;
+static int s_edit_reg[2][3];
 static int s_place_next = 0;
 static layer_t *s_place_last = NULL;
 static int s_place_aabb[8][2][3];
@@ -1232,6 +1292,12 @@ void slope_demo_begin_placement(void)
 {
     s_demo = true;
     s_place_demo = true;
+}
+
+void slope_demo_begin_edits(void)
+{
+    s_demo = true;
+    s_edit_demo = true;
 }
 
 // Put the camera at a known orientation: Goxel's default is a top view, so
@@ -1515,6 +1581,127 @@ static void place_step(void)
     if (f == 40 + nb * 90 + 40) goxel.quit = true;
 }
 
+// #### Inside-region edit demo (AMFM #534 P0.3) #######################
+// The PM asked for one deletion and one recolour inside a shape's own region,
+// on the real ship, visible before and after.  What this shows is the honest
+// answer: the generated surface does NOT follow an individual cell, so the edit
+// is hidden under intact-looking geometry.  What makes that an explicit state
+// rather than a silent one is the stale tint and the resolve buttons, which the
+// later frames show.
+static void edit_step(void)
+{
+    int f = goxel.frame_count;
+    camera_t *cam = goxel.image->active_camera;
+    static int spot[2][3];
+    static layer_t *shape = NULL;
+
+    if (f == 20) {
+        int bbox[2][3];
+        s_demo_base = goxel.image->active_layer;
+        set_view(cam, .7f, 1.05f);
+        if (!volume_get_bbox(goxel_get_layers_volume(goxel.image), bbox, true))
+            return;
+        s_edit_reg[0][0] = bbox[0][0];       s_edit_reg[1][0] = bbox[0][0] + 18;
+        s_edit_reg[0][1] = bbox[0][1];       s_edit_reg[1][1] = bbox[1][1];
+        s_edit_reg[0][2] = bbox[0][2];       s_edit_reg[1][2] = bbox[1][2];
+    } else if (f == 40) {
+        goxel.image->active_layer = s_demo_base;
+        select_box(s_edit_reg);
+        begin_new_shape(SLOPE_KIND_SLOPE);
+        if (s.mod_layer) {
+            s.mod_layer->slope->rise = 24.f;
+            s.mod_layer->slope->revision++;
+            // Keep the layer now: apply_session() clears s.mod_layer.
+            shape = s.mod_layer;
+        }
+    } else if (f == 60 && s.mode && shape) {
+        apply_session();
+        s_demo_layer = NULL;
+        goxel.image->active_layer = s_demo_base;
+        if (goxel.image->selection_mask)
+            volume_clear(goxel.image->selection_mask);
+        printf("edit demo: layer '%s' region [%d %d %d]..[%d %d %d] cells=%d\n",
+               shape->name,
+               shape->slope->aabb[0][0], shape->slope->aabb[0][1],
+               shape->slope->aabb[0][2], shape->slope->aabb[1][0],
+               shape->slope->aabb[1][1], shape->slope->aabb[1][2],
+               count_vol_cells(shape->volume));
+        fflush(stdout);
+    } else if (f == 65 && shape) {
+        // Frame the region so the before/after pair is directly comparable.
+        int j, near_aabb[2][3];
+        float near_box[4][4];
+        for (j = 0; j < 3; j++) {
+            near_aabb[0][j] = shape->slope->aabb[0][j] - 14;
+            near_aabb[1][j] = shape->slope->aabb[1][j] + 14;
+        }
+        bbox_from_aabb(near_box, near_aabb);
+        set_view_box(cam, near_box, 0.f, 1.5708f);
+    } else if (f == 85 && shape) {
+        // One deletion inside the region, on the shape's own layer.
+        int p[3], done = 0;
+        uint8_t c[4];
+        const int *lo = shape->slope->aabb[0], *hi = shape->slope->aabb[1];
+        for (p[2] = lo[2]; p[2] <= hi[2] && !done; p[2]++)
+        for (p[1] = lo[1]; p[1] <= hi[1] && !done; p[1]++)
+        for (p[0] = lo[0]; p[0] <= hi[0] && !done; p[0]++) {
+            volume_get_at(shape->volume, NULL, p, c);
+            if (c[3]) { done = 1; memcpy(spot[0], p, sizeof(p)); }
+        }
+        if (done) {
+            uint8_t zero[4] = {0, 0, 0, 0};
+            volume_set_at(shape->volume, NULL, spot[0], zero);
+            printf("edit demo: deleted [%d %d %d] inside the region -> cells=%d stale=%d\n",
+                   spot[0][0], spot[0][1], spot[0][2],
+                   count_vol_cells(shape->volume), (int)slope_refresh_stale(shape));
+            fflush(stdout);
+        }
+    } else if (f == 110 && shape) {
+        // One recolour inside the region.
+        int p[3], done = 0;
+        uint8_t c[4];
+        const int *lo = shape->slope->aabb[0], *hi = shape->slope->aabb[1];
+        for (p[2] = lo[2]; p[2] <= hi[2] && !done; p[2]++)
+        for (p[1] = lo[1]; p[1] <= hi[1] && !done; p[1]++)
+        for (p[0] = lo[0]; p[0] <= hi[0] && !done; p[0]++) {
+            volume_get_at(shape->volume, NULL, p, c);
+            if (c[3]) { done = 1; memcpy(spot[1], p, sizeof(p)); }
+        }
+        if (done) {
+            uint8_t bright[4] = {40, 255, 90, 255};
+            volume_set_at(shape->volume, NULL, spot[1], bright);
+            printf("edit demo: recoloured [%d %d %d] inside the region -> cells=%d stale=%d\n",
+                   spot[1][0], spot[1][1], spot[1][2],
+                   count_vol_cells(shape->volume), (int)slope_refresh_stale(shape));
+            fflush(stdout);
+        }
+    } else if (f == 135 && shape) {
+        printf("edit demo: Restore cells -> the source voxels come back (%d cells)\n",
+               count_vol_cells(shape->volume));
+        slope_clear_layer(shape);
+        fflush(stdout);
+    }
+
+    if (f == 175) {
+        const char *dir = getenv("GOXEL_SHOTS");
+        char path[512];
+        layer_t *l;
+        int i2 = 0;
+        goxel.image->active_layer = s_demo_base;
+        if (dir && *dir) {
+            snprintf(path, sizeof(path), "%s/edits.gox", dir);
+            printf("edits: save %s -> %d\n", path, goxel_export_to_file(path, "gox"));
+        }
+        DL_FOREACH(goxel.image->layers, l) {
+            printf("layer %d: name='%s' cells=%d shape=%s\n", i2++, l->name,
+                   count_vol_cells(l->volume),
+                   l->slope ? slope_kind_name(l->slope->kind) : "-");
+        }
+        fflush(stdout);
+        goxel.quit = true;
+    }
+}
+
 static void slope_demo_step(void)
 {
     int aabb[2][3];
@@ -1522,6 +1709,10 @@ static void slope_demo_step(void)
     camera_t *cam = goxel.image->active_camera;
 
     if (!s_demo) return;
+    if (s_edit_demo) {
+        edit_step();
+        return;
+    }
     if (s_place_demo) {
         place_step();
         return;
@@ -1626,11 +1817,14 @@ void slope_capture(void)
     static const int AT[] = {60, 200, 340};
     static const int AT_SHAPES[] = {80, 170, 260, 350};
     static const int AT_PLACE[] = {105, 195, 285, 375, 465, 510};
+    static const int AT_EDIT[] = {70, 100, 125, 150};
     static const char *dir = NULL;
     static int idx = 0;
     static const char *once = NULL;
-    const int *at = s_place_demo ? AT_PLACE : s_shape_demo ? AT_SHAPES : AT;
-    int nb = s_place_demo ? (int)(sizeof(AT_PLACE) / sizeof(AT_PLACE[0]))
+    const int *at = s_edit_demo ? AT_EDIT : s_place_demo ? AT_PLACE
+                                 : s_shape_demo ? AT_SHAPES : AT;
+    int nb = s_edit_demo ? (int)(sizeof(AT_EDIT) / sizeof(AT_EDIT[0]))
+           : s_place_demo ? (int)(sizeof(AT_PLACE) / sizeof(AT_PLACE[0]))
            : s_shape_demo ? (int)(sizeof(AT_SHAPES) / sizeof(AT_SHAPES[0]))
                           : (int)(sizeof(AT) / sizeof(AT[0]));
     char path[512];
@@ -1647,7 +1841,9 @@ void slope_capture(void)
     if (!*dir || idx >= nb) return;
     if (goxel.frame_count < at[idx]) return;
 
-    if (s_place_demo)
+    if (s_edit_demo)
+        snprintf(path, sizeof(path), "%s/edit%d.png", dir, idx);
+    else if (s_place_demo)
         snprintf(path, sizeof(path), "%s/place%d.png", dir, idx);
     else if (s_shape_demo)
         snprintf(path, sizeof(path), "%s/shape%d.png", dir, idx);
@@ -1661,7 +1857,7 @@ void slope_capture(void)
     // Once every requested frame is on disk there is nothing left to show.
     // The shapes and placement demos keep running so they can write their
     // document out first.
-    if (idx >= nb && !s_shape_demo && !s_place_demo) goxel.quit = true;
+    if (idx >= nb && !s_shape_demo && !s_place_demo && !s_edit_demo) goxel.quit = true;
 }
 
 // #### Headless self test ###############################################
@@ -1905,8 +2101,10 @@ static void check_shape_geometry(void)
                 m.anchor = anchor;
                 m.closed = closed;
                 m.rise = 10.f;
-                m.aabb[0][0] = 0;   m.aabb[1][0] = 12;
-                m.aabb[0][1] = 0;   m.aabb[1][1] = 20;
+                // Deliberately away from the origin: a builder that leaks a
+                // placeholder coordinate of 0 must land outside this footprint.
+                m.aabb[0][0] = 30;  m.aabb[1][0] = 42;
+                m.aabb[0][1] = 20;  m.aabb[1][1] = 40;
                 m.aabb[0][2] = -5;  m.aabb[1][2] = 3;
                 surf_frame(&m, &fr);
 
@@ -1990,7 +2188,7 @@ void slope_selftest(void)
     layer_t *modl;
     int n0, n1, n2, region_cells;
     uint32_t all0, out0, out1, applied;
-    char buf[128];
+    char buf[320];    // big enough for a full 256-char layer name plus context
 
     printf("== AMFM #534 slope self test ==\n");
     if (!volume_get_bbox(goxel_get_layers_volume(img), bbox, true)) {
@@ -2250,25 +2448,27 @@ void slope_selftest(void)
                 volume_iterator_t iter;
                 uint8_t c[4];
                 int q[3], found = 0;
+                int at[3];
                 int reg[2][3];
                 memcpy(reg, sh->slope->aabb, sizeof(reg));
                 for (p[2] = reg[0][2]; p[2] <= reg[1][2] && !found; p[2]++)
                 for (p[1] = reg[0][1]; p[1] <= reg[1][1] && !found; p[1]++)
                 for (p[0] = reg[0][0]; p[0] <= reg[1][0] && !found; p[0]++) {
                     volume_get_at(sh->volume, NULL, p, c);
-                    if (c[3] == 0) found = 1;
+                    if (c[3] == 0) { found = 1; memcpy(at, p, sizeof(at)); }
                 }
+                if (found) memcpy(p, at, sizeof(at));
                 (void) iter; (void) q; (void) tries;
                 if (!found) {
                     check("an empty cell inside the region was found", false, NULL);
                 } else {
-                    base_ok = !slope_conflict(sh);
+                    base_ok = !slope_refresh_stale(sh);
                     ensure_mesh(sh);
                     mesh_before = sh->slope->mesh_hash;
 
                     vec4_set(c, 20, 200, 60, 255);
                     volume_set_at(sh->volume, NULL, p, c);
-                    after_add = slope_conflict(sh);
+                    after_add = slope_refresh_stale(sh);
                     check("adding a cell inside the region is reported",
                           base_ok && after_add, NULL);
 
@@ -2280,14 +2480,87 @@ void slope_selftest(void)
 
                     vec4_set(c, 200, 20, 60, 255);
                     volume_set_at(sh->volume, NULL, p, c);
-                    after_recolour = slope_conflict(sh);
+                    after_recolour = slope_refresh_stale(sh);
                     check("recolouring inside the region stays reported",
                           after_recolour, NULL);
 
                     vec4_set(c, 0, 0, 0, 0);
                     volume_set_at(sh->volume, NULL, p, c);
-                    after_undo = !slope_conflict(sh);
+                    after_undo = !slope_refresh_stale(sh);
                     check("removing the added cell clears the report", after_undo, NULL);
+
+                    // #### deleting a cell the surface then hides ####
+                    // The honest version of "no ghost shell": the surface does
+                    // NOT follow an individual deleted cell, so the deletion is
+                    // hidden under intact-looking geometry.  That is a real
+                    // limitation of a region-derived surface; what the Owner
+                    // needs is to see it and resolve it, so both are checked.
+                    {
+                        int q[3], have = 0, cells_pre, cells_mid, at[3];
+                        uint8_t keep[4];
+                        uint32_t mesh_pre;
+
+                        for (q[2] = reg[0][2]; q[2] <= reg[1][2] && !have; q[2]++)
+                        for (q[1] = reg[0][1]; q[1] <= reg[1][1] && !have; q[1]++)
+                        for (q[0] = reg[0][0]; q[0] <= reg[1][0] && !have; q[0]++) {
+                            volume_get_at(sh->volume, NULL, q, keep);
+                            if (keep[3]) { have = 1; memcpy(at, q, sizeof(at)); }
+                        }
+                        if (have) memcpy(q, at, sizeof(at));
+                        if (!have) {
+                            check("an occupied cell inside the region was found",
+                                  false, NULL);
+                        } else {
+                            ensure_mesh(sh);
+                            mesh_pre = sh->slope->mesh_hash;
+                            cells_pre = count_vol_cells(sh->volume);
+                            vec4_set(keep, 0, 0, 0, 0);
+                            volume_set_at(sh->volume, NULL, q, keep);
+                            cells_mid = count_vol_cells(sh->volume);
+                            snprintf(buf, sizeof(buf), "deleted [%d %d %d], %d -> %d cells",
+                                     q[0], q[1], q[2], cells_pre, cells_mid);
+                            check("a cell inside the region really is deleted",
+                                  cells_mid == cells_pre - 1 &&
+                                  slope_refresh_stale(sh), buf);
+                            ensure_mesh(sh);
+                            snprintf(buf, sizeof(buf), "mesh %u -> %u",
+                                     mesh_pre, sh->slope->mesh_hash);
+                            check("KNOWN LIMITATION: the surface still hides it",
+                                  sh->slope->mesh_hash == mesh_pre, buf);
+
+                            // resolve 1: accept the edits, keep the surface
+                            sh->slope->applied_hash =
+                                cells_hash_in_region(sh, sh->slope->aabb);
+                            sh->slope->stale = 0;
+                            check("accepting the edits clears the stale flag",
+                                  !sh->slope->stale, buf);
+
+                            // put the cell back so the rest of the run is clean
+                            vec4_set(keep, 20, 200, 60, 255);
+                            volume_set_at(sh->volume, NULL, q, keep);
+                            slope_refresh_stale(sh);
+                        }
+                    }
+
+                    // #### resolve 2: restore the cells as plain voxels ####
+                    {
+                        layer_t *bev = NULL, *l2;
+                        int before;
+                        DL_FOREACH(img->layers, l2)
+                            if (l2->slope && l2->slope->kind == SLOPE_KIND_BEVEL)
+                                bev = l2;
+                        if (!bev) {
+                            check("a shape layer was available to restore", false, NULL);
+                        } else {
+                            before = count_vol_cells(bev->volume);
+                            slope_clear_layer(bev);
+                            snprintf(buf, sizeof(buf), "%s: %d cells back as voxels",
+                                     bev->name, before);
+                            check("restoring cells leaves plain voxel geometry",
+                                  bev->slope == NULL &&
+                                  count_vol_cells(bev->volume) == before, buf);
+                        }
+                    }
                 }
             }
         }
@@ -2312,8 +2585,12 @@ void slope_selftest(void)
                     xmin = min(xmin, q[0]); xmax = max(xmax, q[0]);
                     ymin = min(ymin, q[1]); ymax = max(ymax, q[1]);
                 }
-                snprintf(buf, sizeof(buf), "%s: x %.2f..%.2f y %.2f..%.2f",
-                         l->name, xmin, xmax, ymin, ymax);
+                snprintf(buf, sizeof(buf),
+                         "%s: mesh x %.2f..%.2f y %.2f..%.2f vs region "
+                         "[%d %d]..[%d %d]",
+                         l->name, xmin, xmax, ymin, ymax,
+                         l->slope->aabb[0][0], l->slope->aabb[0][1],
+                         l->slope->aabb[1][0], l->slope->aabb[1][1]);
                 check("the surface footprint matches its source region",
                       fabsf(xmin - (l->slope->aabb[0][0] - SLOPE_EPS)) < 0.01f &&
                       fabsf(xmax - (l->slope->aabb[1][0] + 1.f + SLOPE_EPS)) < 0.01f &&

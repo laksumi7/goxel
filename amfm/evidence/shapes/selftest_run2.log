@@ -55,38 +55,38 @@ before: cells=148383 region_cells=715
 [PASS] shape stays inside its region footprint -- Bevel/open
 [PASS] shape crown sits at the requested height -- Bevel: crown 5.00 want 5.00
 [PASS] shape does not cross its anchor plane -- Bevel: z -5.00..5.00 anchor -5.00
-[PASS] bevel chamfers the edges its kind asks for -- Bevel open: face starts at -0.00
-[PASS] the heap is intact after the shape -- Bevel open: face starts at -0.00
+[PASS] bevel chamfers the edges its kind asks for -- Bevel open: face starts at 30.00
+[PASS] the heap is intact after the shape -- Bevel open: face starts at 30.00
 [PASS] shape builds a real surface -- Bevel/floor/full: 36 vertices
 [PASS] shape stays inside its region footprint -- Bevel/full
 [PASS] shape crown sits at the requested height -- Bevel: crown 5.00 want 5.00
 [PASS] shape does not cross its anchor plane -- Bevel: z -5.00..5.00 anchor -5.00
-[PASS] bevel chamfers the edges its kind asks for -- Bevel full: face starts at 6.50
-[PASS] the heap is intact after the shape -- Bevel full: face starts at 6.50
+[PASS] bevel chamfers the edges its kind asks for -- Bevel full: face starts at 36.50
+[PASS] the heap is intact after the shape -- Bevel full: face starts at 36.50
 [PASS] shape builds a real surface -- Bevel/mid/open: 36 vertices
 [PASS] shape stays inside its region footprint -- Bevel/open
 [PASS] shape crown sits at the requested height -- Bevel: crown 4.50 want 4.50
 [PASS] shape does not cross its anchor plane -- Bevel: z -5.50..4.50 anchor -5.50
-[PASS] bevel chamfers the edges its kind asks for -- Bevel open: face starts at -0.00
-[PASS] the heap is intact after the shape -- Bevel open: face starts at -0.00
+[PASS] bevel chamfers the edges its kind asks for -- Bevel open: face starts at 30.00
+[PASS] the heap is intact after the shape -- Bevel open: face starts at 30.00
 [PASS] shape builds a real surface -- Bevel/mid/full: 36 vertices
 [PASS] shape stays inside its region footprint -- Bevel/full
 [PASS] shape crown sits at the requested height -- Bevel: crown 4.50 want 4.50
 [PASS] shape does not cross its anchor plane -- Bevel: z -5.50..4.50 anchor -5.50
-[PASS] bevel chamfers the edges its kind asks for -- Bevel full: face starts at 6.50
-[PASS] the heap is intact after the shape -- Bevel full: face starts at 6.50
+[PASS] bevel chamfers the edges its kind asks for -- Bevel full: face starts at 36.50
+[PASS] the heap is intact after the shape -- Bevel full: face starts at 36.50
 [PASS] shape builds a real surface -- Bevel/ceil/open: 36 vertices
 [PASS] shape stays inside its region footprint -- Bevel/open
 [PASS] shape crown sits at the requested height -- Bevel: crown -6.00 want -6.00
 [PASS] shape does not cross its anchor plane -- Bevel: z -6.00..4.00 anchor 4.00
-[PASS] bevel chamfers the edges its kind asks for -- Bevel open: face starts at -0.00
-[PASS] the heap is intact after the shape -- Bevel open: face starts at -0.00
+[PASS] bevel chamfers the edges its kind asks for -- Bevel open: face starts at 30.00
+[PASS] the heap is intact after the shape -- Bevel open: face starts at 30.00
 [PASS] shape builds a real surface -- Bevel/ceil/full: 36 vertices
 [PASS] shape stays inside its region footprint -- Bevel/full
 [PASS] shape crown sits at the requested height -- Bevel: crown -6.00 want -6.00
 [PASS] shape does not cross its anchor plane -- Bevel: z -6.00..4.00 anchor 4.00
-[PASS] bevel chamfers the edges its kind asks for -- Bevel full: face starts at 6.50
-[PASS] the heap is intact after the shape -- Bevel full: face starts at 6.50
+[PASS] bevel chamfers the edges its kind asks for -- Bevel full: face starts at 36.50
+[PASS] the heap is intact after the shape -- Bevel full: face starts at 36.50
 [PASS] shape builds a real surface -- Cylinder/floor/open: 294 vertices
 [PASS] shape stays inside its region footprint -- Cylinder/open
 [PASS] shape crown sits at the requested height -- Cylinder: crown 5.00 want 5.00
@@ -163,12 +163,16 @@ before: cells=148383 region_cells=715
 [PASS] the surface does not ghost to the new cell -- mesh 3845648702 -> 3845648702
 [PASS] recolouring inside the region stays reported
 [PASS] removing the added cell clears the report
-[PASS] the surface footprint matches its source region -- Slope 1: x -60.00..-43.00 y -5.00..6.00
-[PASS] the surface footprint matches its source region -- Bevel 2: x 40.00..64.00 y -34.00..34.00
-0.201: Save to C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox save_to_file (src/formats/gox.c:259)
-0.248: Saved C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox sys_on_saved (src/system.c:312)
+[PASS] a cell inside the region really is deleted -- deleted [-60 -5 -5], 715 -> 714 cells
+[PASS] KNOWN LIMITATION: the surface still hides it -- mesh 3845648702 -> 3845648702
+[PASS] accepting the edits clears the stale flag -- mesh 3845648702 -> 3845648702
+[PASS] restoring cells leaves plain voxel geometry -- Bevel 2: 28956 cells back as voxels
+[PASS] the surface footprint matches its source region -- Slope 1: mesh x -60.00..-43.00 y -5.00..6.00 vs region [-60 -5]..[-44 5]
+[PASS] the surface footprint matches its source region -- Cylinder 3: mesh x -39.00..-14.00 y -28.00..28.00 vs region [-39 -28]..[-15 27]
+0.196: Save to C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox save_to_file (src/formats/gox.c:259)
+0.241: Saved C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox sys_on_saved (src/system.c:312)
 [PASS] document saved as gox -- C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox
 [PASS] reopen keeps the cell count -- pre=148382 post=148382
-[PASS] reopen keeps every modifier editable -- 4 of 4 modifiers
-[PASS] reopen keeps the anchor plane and open/closed shape -- 4 of 4 modifiers
-== self test: 160 checks, 0 failed ==
+[PASS] reopen keeps every modifier editable -- 3 of 3 modifiers
+[PASS] reopen keeps the anchor plane and open/closed shape -- 3 of 3 modifiers
+== self test: 164 checks, 0 failed ==

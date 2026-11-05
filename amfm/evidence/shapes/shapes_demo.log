@@ -5,8 +5,8 @@
  on_dir (src/script.c:922)
 [33;31m0.003: Cannot open C:\Users\laksu\AppData\Roaming\Goxel\/recent-files.txt: No such file or directory[m goxel_load_recent_files (src/goxel.c:432)
 0.003: Read settings file: C:\Users\laksu\AppData\Roaming\Goxel\/settings.ini settings_load (src/gui/settings.c:280)
-0.018: OpenGL version: 4.6.0 NVIDIA 595.79                          render_init (src/render.c:309)
-0.018: OpenGL renderer: NVIDIA GeForce RTX 4080 Laptop GPU/PCIe/SSE2 render_init (src/render.c:310)
+0.017: OpenGL version: 4.6.0 NVIDIA 595.79                          render_init (src/render.c:309)
+0.017: OpenGL renderer: NVIDIA GeForce RTX 4080 Laptop GPU/PCIe/SSE2 render_init (src/render.c:310)
 shape 0 (Slope): region [-64 -34 -25]..[-40 34 18] rise 20.00
 slope: wrote C:/projects_tools/goxel-lab/evidence/shapes/shape0.png
 shape 1 (Bevel): region [40 -34 -25]..[64 34 18] rise 6.00
@@ -15,8 +15,8 @@ shape 2 (Cylinder): region [-39 -34 -25]..[-15 34 18] rise 28.00
 slope: wrote C:/projects_tools/goxel-lab/evidence/shapes/shape2.png
 shape 3 (Sphere): region [14 -34 -25]..[39 34 18] rise 43.00
 slope: wrote C:/projects_tools/goxel-lab/evidence/shapes/shape3.png
-2.266: Save to C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox save_to_file (src/formats/gox.c:259)
-2.324: Saved C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox sys_on_saved (src/system.c:312)
+0.555: Save to C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox save_to_file (src/formats/gox.c:259)
+0.604: Saved C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox sys_on_saved (src/system.c:312)
 shapes: save C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox -> 0
 layer 0: name='Layer.1' cells=36111 shape=- rise=0.00
 layer 1: name='Slope 1' cells=15800 shape=Slope rise=20.00

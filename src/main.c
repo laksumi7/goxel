@@ -466,6 +466,8 @@ int main(int argc, char **argv)
         slope_demo_begin_shapes();
     if (getenv("GOXEL_PLACE_DEMO"))
         slope_demo_begin_placement();
+    if (getenv("GOXEL_EDIT_DEMO"))
+        slope_demo_begin_edits();
 
     if (args.script) {
         script_run_from_file(args.script, args.script_args_nb, args.script_args);
