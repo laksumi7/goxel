@@ -112,6 +112,11 @@ void slope_ensure_art_layer(void);
 // A3-P0) refuses to edit then, so it can never fight the manual flow.
 bool slope_session_is_open(void);
 
+// Round off one voxel as a closed cylinder through the normal authoring path
+// (select -> shape -> apply), so the edit is undoable and adds no voxels.
+// Used by the live bridge's `shape` verb.  Returns 0 or a negative refusal code.
+int slope_apply_shape_at(const int cell[3], const char *name, float rise);
+
 // Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set, or a
 // single frame to the file named by GOXEL_SHOTS_ONCE.
 void slope_capture(void);

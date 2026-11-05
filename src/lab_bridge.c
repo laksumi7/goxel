@@ -229,6 +229,57 @@ static void cmd_set(const char *args, int del)
     out_add("ok\n");
 }
 
+// One round barrel: rounds off a single voxel through the editor's own shape
+// path.  Same guards as the brush edits, and the result is one history entry,
+// so a single Ctrl+Z in the editor takes the barrel back to its square cell.
+static void cmd_shape(const char *args)
+{
+    int cell[3];
+    int before, layers_before = 0, layers_after = 0;
+    float rise = 0.45f;
+    char name[64] = "";
+    const char *err;
+    layer_t *l;
+    int rc;
+
+    if (sscanf(args, "%d %d %d %f %63s", &cell[0], &cell[1], &cell[2],
+               &rise, name) < 3) {
+        out_add("err usage: shape x y z [rise] [name]\n");
+        return;
+    }
+    if (cell[0] < -LAB_MAXPOS || cell[0] > LAB_MAXPOS ||
+        cell[1] < -LAB_MAXPOS || cell[1] > LAB_MAXPOS ||
+        cell[2] < -LAB_MAXPOS || cell[2] > LAB_MAXPOS) {
+        out_add("err position out of range\n");
+        return;
+    }
+    if (rise <= 0.f || rise > 1.f) {
+        out_add("err rise must be in (0, 1]\n");
+        return;
+    }
+    err = edit_guard();
+    if (err) {
+        out_fmt("err %s\n", err);
+        return;
+    }
+    DL_FOREACH(goxel.image->layers, l) layers_before++;
+    before = count_cells(goxel_get_layers_volume(goxel.image));
+    rc = slope_apply_shape_at(cell, name[0] ? name : NULL, rise);
+    DL_FOREACH(goxel.image->layers, l) layers_after++;
+
+    switch (rc) {
+        case 0:
+            out_fmt("shape %d %d %d rise %.3f layers %d->%d cells %d history "
+                    "pushed\n", cell[0], cell[1], cell[2], rise, layers_before,
+                    layers_after, before);
+            out_add("ok\n");
+            break;
+        case -1: out_add("err a shape session is open in the editor\n"); break;
+        case -3: out_fmt("err no voxel at %d %d %d\n", cell[0], cell[1], cell[2]); break;
+        default: out_fmt("err shape refused (%d)\n", rc); break;
+    }
+}
+
 static void handle_line(const char *line)
 {
     char cmd[32] = "";
@@ -250,6 +301,8 @@ static void handle_line(const char *line)
         cmd_set(args, 0);
     } else if (!strcmp(cmd, "del")) {
         cmd_set(args, 1);
+    } else if (!strcmp(cmd, "shape")) {
+        cmd_shape(args);
     } else if (!strcmp(cmd, "undo")) {
         if (!goxel.image) { out_add("err no image\n"); return; }
         image_undo(goxel.image);
@@ -259,8 +312,8 @@ static void handle_line(const char *line)
         image_redo(goxel.image);
         out_add("redo applied\nok\n");
     } else if (!strcmp(cmd, "help")) {
-        out_add("commands: ping state set x y z [r g b] | del x y z | undo | "
-                "redo | help\nok\n");
+        out_add("commands: ping state set x y z [r g b] | del x y z | "
+                "shape x y z [rise] [name] | undo | redo | help\nok\n");
     } else {
         out_fmt("err unknown command '%s'\n", cmd);
     }

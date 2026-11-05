@@ -1420,6 +1420,30 @@ void slope_dump_cells(const char *path)
                 l->slope ? 1 : 0);
         i++;
     }
+    // Distinct RGBA values in use, so a script can reuse the exact colours of
+    // an existing part instead of guessing at them.
+    {
+        static struct { uint8_t c[4]; int n; } seen[64];
+        int ns = 0, k;
+        layer_t *ly;
+        volume_iterator_t it;
+        int p[3];
+        uint8_t c[4];
+        DL_FOREACH(goxel.image->layers, ly) {
+            if (!ly->volume) continue;
+            it = volume_get_iterator(ly->volume, VOLUME_ITER_VOXELS | VOLUME_ITER_SKIP_EMPTY);
+            while (volume_iter(&it, p)) {
+                volume_get_at(ly->volume, &it, p, c);
+                if (c[3] == 0) continue;
+                for (k = 0; k < ns; k++)
+                    if (!memcmp(seen[k].c, c, 4)) { seen[k].n++; break; }
+                if (k == ns && ns < 64) { memcpy(seen[ns].c, c, 4); seen[ns].n = 1; ns++; }
+            }
+        }
+        for (k = 0; k < ns; k++)
+            fprintf(f, "# colour %d %d %d %d count=%d\n", seen[k].c[0], seen[k].c[1],
+                    seen[k].c[2], seen[k].c[3], seen[k].n);
+    }
     fclose(f);
 }
 
@@ -1445,6 +1469,69 @@ void slope_dump_layers(FILE *f)
 bool slope_session_is_open(void)
 {
     return s.mode != S_MODE_NONE;
+}
+
+/*
+ * Function: slope_apply_shape_at
+ *
+ * Apply one round barrel (a closed cylinder) to a single voxel, through exactly
+ * the same authoring path the Owner drives by hand: select the cell, begin the
+ * shape, set the parameters, apply.  Nothing outside that one cell is touched,
+ * no voxel is added or removed, and the edit lands in the history so Ctrl+Z
+ * takes it back.
+ *
+ * Inputs:
+ *   cell - the voxel to round off; it must exist on some art layer
+ *   name - name for the new shape layer, or NULL to keep "Cylinder N"
+ *   rise - the cylinder radius in voxels (0.45 gives a barrel inside its cell)
+ *
+ * Returns:
+ *   0 on success, negative when refused: -1 a shape session is open in the UI,
+ *   -2 no image, -3 the cell is not filled on any art layer, -4 the shape was
+ *   not created (region rejected).
+ */
+int slope_apply_shape_at(const int cell[3], const char *name, float rise)
+{
+    layer_t *src = NULL, *l;
+    slope_mod_t *m;
+    int reg[2][3];
+
+    if (s.mode != S_MODE_NONE) return -1;
+    if (!goxel.image || !goxel.image->active_layer) return -2;
+
+    // The shape is a clone of the selected region on the active layer, so the
+    // cell has to be found first and its own layer made active.
+    DL_FOREACH(goxel.image->layers, l) {
+        if (l->slope) continue;
+        if (volume_get_alpha_at(l->volume, NULL, cell) > 0) { src = l; break; }
+    }
+    if (!src) return -3;
+
+    reg[0][0] = reg[1][0] = cell[0];
+    reg[0][1] = reg[1][1] = cell[1];
+    reg[0][2] = reg[1][2] = cell[2];
+
+    goxel.image->active_layer = src;
+    select_box(reg);
+    begin_new_shape(SLOPE_KIND_CYLINDER);
+    if (!s.mod_layer) {
+        if (goxel.image->selection_mask)
+            volume_clear(goxel.image->selection_mask);
+        return -4;
+    }
+    m = s.mod_layer->slope;
+    m->kind = SLOPE_KIND_CYLINDER;
+    m->closed = 1;                  // a full barrel, not an arch
+    m->dir = SLOPE_DIR_PY;          // along the barrel axis
+    m->anchor = SLOPE_ANCHOR_MID;   // centred in the cell
+    m->rise = rise;
+    m->revision++;
+    if (name && *name)
+        snprintf(s.mod_layer->name, sizeof(s.mod_layer->name), "%s", name);
+    apply_session();                // pushes history, returns to the art layer
+    if (goxel.image->selection_mask)
+        volume_clear(goxel.image->selection_mask);
+    return 0;
 }
 
 // Put the camera at a known orientation: Goxel's default is a top view, so
