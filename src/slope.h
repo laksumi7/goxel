@@ -28,8 +28,8 @@ enum {
     SLOPE_DIR_COUNT,
 };
 
-// The generated surface kinds.  Every kind stands on the region's bottom
-// plane, so a shape can never dip under the model it was made from.
+// The generated surface kinds.  Every kind is built inside the region box and
+// measured from the plane chosen by `anchor`.
 enum {
     SLOPE_KIND_SLOPE = 0,
     SLOPE_KIND_BEVEL,
@@ -38,12 +38,27 @@ enum {
     SLOPE_KIND_COUNT,
 };
 
+// Which region plane the shape is measured from, so a shape is not stuck
+// growing upwards: a hull side can slope inwards, a barrel can lie across the
+// ship, a casing can hang from the deck.
+enum {
+    SLOPE_ANCHOR_FLOOR = 0,  // grows up from the region bottom
+    SLOPE_ANCHOR_MID,        // centred on the region mid plane
+    SLOPE_ANCHOR_CEIL,       // grows down from the region top
+    SLOPE_ANCHOR_COUNT,
+};
+
 typedef struct slope_mod {
     int      aabb[2][3];  // Inclusive source-cell region replaced by the surface.
     int      kind;        // SLOPE_KIND_*
     int      dir;         // SLOPE_DIR_*: axis the surface is built along.
-    float    rise;        // Height of the surface above the region bottom, in voxels.
+    int      anchor;      // SLOPE_ANCHOR_*: which region plane it is measured from.
+    int      closed;      // Full barrel / ellipsoid / all-edge chamfer instead of
+                          // an arch, dome or single directed chamfer.
+    float    rise;        // Height of the surface above its anchor plane, in voxels.
     uint32_t revision;
+    uint32_t applied_hash;  // Cells of this layer inside the region when the
+                            // shape was applied; edits after that are a conflict.
     uint8_t  color[4];    // Surface colour (sampled from the source cells).
     // Transient render cache: not copied, not hashed.
     model3d_t *mesh;
@@ -81,6 +96,7 @@ void slope_selftest(void);
 // (GOXEL_SLOPE_DEMO=1), or every shape kind in turn (GOXEL_SHAPE_DEMO=1).
 void slope_demo_begin(void);
 void slope_demo_begin_shapes(void);
+void slope_demo_begin_placement(void);
 
 // Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set, or a
 // single frame to the file named by GOXEL_SHOTS_ONCE.

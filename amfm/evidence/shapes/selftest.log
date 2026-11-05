@@ -21,22 +21,126 @@ before: cells=148383 region_cells=715
 [PASS] releasing gives the tool back
 [PASS] undo restores the original document -- cells=148383 layers=1
 [PASS] redo restores the modifier -- cells=148383 layers=2
-[PASS] shape builds a real surface -- Slope: 36 vertices
-[PASS] shape never dips under its region -- Slope: zmin -5.004 floor -5.000
-[PASS] shape crown sits at the requested height -- Slope: zmax 5.000 want 5.000
-[PASS] the heap is intact after the shape -- Slope
-[PASS] shape builds a real surface -- Bevel: 36 vertices
-[PASS] shape never dips under its region -- Bevel: zmin -5.004 floor -5.000
-[PASS] shape crown sits at the requested height -- Bevel: zmax 5.000 want 5.000
-[PASS] the heap is intact after the shape -- Bevel
-[PASS] shape builds a real surface -- Cylinder: 294 vertices
-[PASS] shape never dips under its region -- Cylinder: zmin -5.004 floor -5.000
-[PASS] shape crown sits at the requested height -- Cylinder: zmax 4.996 want 5.000
-[PASS] the heap is intact after the shape -- Cylinder
-[PASS] shape builds a real surface -- Sphere: 1728 vertices
-[PASS] shape never dips under its region -- Sphere: zmin -5.004 floor -5.000
-[PASS] shape crown sits at the requested height -- Sphere: zmax 4.996 want 5.000
-[PASS] the heap is intact after the shape -- Sphere
+[PASS] shape builds a real surface -- Slope/floor/open: 36 vertices
+[PASS] shape stays inside its region footprint -- Slope/open
+[PASS] shape crown sits at the requested height -- Slope: crown 5.00 want 5.00
+[PASS] shape does not cross its anchor plane -- Slope: z -5.00..5.00 anchor -5.00
+[PASS] the heap is intact after the shape -- Slope: z -5.00..5.00 anchor -5.00
+[PASS] shape builds a real surface -- Slope/floor/full: 36 vertices
+[PASS] shape stays inside its region footprint -- Slope/full
+[PASS] shape crown sits at the requested height -- Slope: crown 5.00 want 5.00
+[PASS] shape does not cross its anchor plane -- Slope: z -5.00..5.00 anchor -5.00
+[PASS] the heap is intact after the shape -- Slope: z -5.00..5.00 anchor -5.00
+[PASS] shape builds a real surface -- Slope/mid/open: 36 vertices
+[PASS] shape stays inside its region footprint -- Slope/open
+[PASS] shape crown sits at the requested height -- Slope: crown 4.50 want 4.50
+[PASS] shape does not cross its anchor plane -- Slope: z -5.50..4.50 anchor -5.50
+[PASS] the heap is intact after the shape -- Slope: z -5.50..4.50 anchor -5.50
+[PASS] shape builds a real surface -- Slope/mid/full: 36 vertices
+[PASS] shape stays inside its region footprint -- Slope/full
+[PASS] shape crown sits at the requested height -- Slope: crown 4.50 want 4.50
+[PASS] shape does not cross its anchor plane -- Slope: z -5.50..4.50 anchor -5.50
+[PASS] the heap is intact after the shape -- Slope: z -5.50..4.50 anchor -5.50
+[PASS] shape builds a real surface -- Slope/ceil/open: 36 vertices
+[PASS] shape stays inside its region footprint -- Slope/open
+[PASS] shape crown sits at the requested height -- Slope: crown -6.00 want -6.00
+[PASS] shape does not cross its anchor plane -- Slope: z -6.00..4.00 anchor 4.00
+[PASS] the heap is intact after the shape -- Slope: z -6.00..4.00 anchor 4.00
+[PASS] shape builds a real surface -- Slope/ceil/full: 36 vertices
+[PASS] shape stays inside its region footprint -- Slope/full
+[PASS] shape crown sits at the requested height -- Slope: crown -6.00 want -6.00
+[PASS] shape does not cross its anchor plane -- Slope: z -6.00..4.00 anchor 4.00
+[PASS] the heap is intact after the shape -- Slope: z -6.00..4.00 anchor 4.00
+[PASS] shape builds a real surface -- Bevel/floor/open: 36 vertices
+[PASS] shape stays inside its region footprint -- Bevel/open
+[PASS] shape crown sits at the requested height -- Bevel: crown 5.00 want 5.00
+[PASS] shape does not cross its anchor plane -- Bevel: z -5.00..5.00 anchor -5.00
+[PASS] bevel chamfers the edges its kind asks for -- Bevel open: face starts at -0.00
+[PASS] the heap is intact after the shape -- Bevel open: face starts at -0.00
+[PASS] shape builds a real surface -- Bevel/floor/full: 36 vertices
+[PASS] shape stays inside its region footprint -- Bevel/full
+[PASS] shape crown sits at the requested height -- Bevel: crown 5.00 want 5.00
+[PASS] shape does not cross its anchor plane -- Bevel: z -5.00..5.00 anchor -5.00
+[PASS] bevel chamfers the edges its kind asks for -- Bevel full: face starts at 6.50
+[PASS] the heap is intact after the shape -- Bevel full: face starts at 6.50
+[PASS] shape builds a real surface -- Bevel/mid/open: 36 vertices
+[PASS] shape stays inside its region footprint -- Bevel/open
+[PASS] shape crown sits at the requested height -- Bevel: crown 4.50 want 4.50
+[PASS] shape does not cross its anchor plane -- Bevel: z -5.50..4.50 anchor -5.50
+[PASS] bevel chamfers the edges its kind asks for -- Bevel open: face starts at -0.00
+[PASS] the heap is intact after the shape -- Bevel open: face starts at -0.00
+[PASS] shape builds a real surface -- Bevel/mid/full: 36 vertices
+[PASS] shape stays inside its region footprint -- Bevel/full
+[PASS] shape crown sits at the requested height -- Bevel: crown 4.50 want 4.50
+[PASS] shape does not cross its anchor plane -- Bevel: z -5.50..4.50 anchor -5.50
+[PASS] bevel chamfers the edges its kind asks for -- Bevel full: face starts at 6.50
+[PASS] the heap is intact after the shape -- Bevel full: face starts at 6.50
+[PASS] shape builds a real surface -- Bevel/ceil/open: 36 vertices
+[PASS] shape stays inside its region footprint -- Bevel/open
+[PASS] shape crown sits at the requested height -- Bevel: crown -6.00 want -6.00
+[PASS] shape does not cross its anchor plane -- Bevel: z -6.00..4.00 anchor 4.00
+[PASS] bevel chamfers the edges its kind asks for -- Bevel open: face starts at -0.00
+[PASS] the heap is intact after the shape -- Bevel open: face starts at -0.00
+[PASS] shape builds a real surface -- Bevel/ceil/full: 36 vertices
+[PASS] shape stays inside its region footprint -- Bevel/full
+[PASS] shape crown sits at the requested height -- Bevel: crown -6.00 want -6.00
+[PASS] shape does not cross its anchor plane -- Bevel: z -6.00..4.00 anchor 4.00
+[PASS] bevel chamfers the edges its kind asks for -- Bevel full: face starts at 6.50
+[PASS] the heap is intact after the shape -- Bevel full: face starts at 6.50
+[PASS] shape builds a real surface -- Cylinder/floor/open: 294 vertices
+[PASS] shape stays inside its region footprint -- Cylinder/open
+[PASS] shape crown sits at the requested height -- Cylinder: crown 5.00 want 5.00
+[PASS] shape does not cross its anchor plane -- Cylinder: z -5.00..5.00 anchor -5.00
+[PASS] the heap is intact after the shape -- Cylinder: z -5.00..5.00 anchor -5.00
+[PASS] shape builds a real surface -- Cylinder/floor/full: 576 vertices
+[PASS] shape stays inside its region footprint -- Cylinder/full
+[PASS] closed shape spans centre by rise -- Cylinder: z -5.00..15.00 want -5.00..15.00
+[PASS] the heap is intact after the shape -- Cylinder: z -5.00..15.00 want -5.00..15.00
+[PASS] shape builds a real surface -- Cylinder/mid/open: 294 vertices
+[PASS] shape stays inside its region footprint -- Cylinder/open
+[PASS] shape crown sits at the requested height -- Cylinder: crown 4.50 want 4.50
+[PASS] shape does not cross its anchor plane -- Cylinder: z -5.50..4.50 anchor -5.50
+[PASS] the heap is intact after the shape -- Cylinder: z -5.50..4.50 anchor -5.50
+[PASS] shape builds a real surface -- Cylinder/mid/full: 576 vertices
+[PASS] shape stays inside its region footprint -- Cylinder/full
+[PASS] closed shape spans centre by rise -- Cylinder: z -10.50..9.50 want -10.50..9.50
+[PASS] the heap is intact after the shape -- Cylinder: z -10.50..9.50 want -10.50..9.50
+[PASS] shape builds a real surface -- Cylinder/ceil/open: 294 vertices
+[PASS] shape stays inside its region footprint -- Cylinder/open
+[PASS] shape crown sits at the requested height -- Cylinder: crown -6.00 want -6.00
+[PASS] shape does not cross its anchor plane -- Cylinder: z -6.00..4.00 anchor 4.00
+[PASS] the heap is intact after the shape -- Cylinder: z -6.00..4.00 anchor 4.00
+[PASS] shape builds a real surface -- Cylinder/ceil/full: 576 vertices
+[PASS] shape stays inside its region footprint -- Cylinder/full
+[PASS] closed shape spans centre by rise -- Cylinder: z -16.00..4.00 want -16.00..4.00
+[PASS] the heap is intact after the shape -- Cylinder: z -16.00..4.00 want -16.00..4.00
+[PASS] shape builds a real surface -- Sphere/floor/open: 1728 vertices
+[PASS] shape stays inside its region footprint -- Sphere/open
+[PASS] shape crown sits at the requested height -- Sphere: crown 5.00 want 5.00
+[PASS] shape does not cross its anchor plane -- Sphere: z -5.00..5.00 anchor -5.00
+[PASS] the heap is intact after the shape -- Sphere: z -5.00..5.00 anchor -5.00
+[PASS] shape builds a real surface -- Sphere/floor/full: 3312 vertices
+[PASS] shape stays inside its region footprint -- Sphere/full
+[PASS] closed shape spans centre by rise -- Sphere: z -5.00..15.00 want -5.00..15.00
+[PASS] the heap is intact after the shape -- Sphere: z -5.00..15.00 want -5.00..15.00
+[PASS] shape builds a real surface -- Sphere/mid/open: 1728 vertices
+[PASS] shape stays inside its region footprint -- Sphere/open
+[PASS] shape crown sits at the requested height -- Sphere: crown 4.50 want 4.50
+[PASS] shape does not cross its anchor plane -- Sphere: z -5.50..4.50 anchor -5.50
+[PASS] the heap is intact after the shape -- Sphere: z -5.50..4.50 anchor -5.50
+[PASS] shape builds a real surface -- Sphere/mid/full: 3312 vertices
+[PASS] shape stays inside its region footprint -- Sphere/full
+[PASS] closed shape spans centre by rise -- Sphere: z -10.50..9.50 want -10.50..9.50
+[PASS] the heap is intact after the shape -- Sphere: z -10.50..9.50 want -10.50..9.50
+[PASS] shape builds a real surface -- Sphere/ceil/open: 1728 vertices
+[PASS] shape stays inside its region footprint -- Sphere/open
+[PASS] shape crown sits at the requested height -- Sphere: crown -6.00 want -6.00
+[PASS] shape does not cross its anchor plane -- Sphere: z -6.00..4.00 anchor 4.00
+[PASS] the heap is intact after the shape -- Sphere: z -6.00..4.00 anchor 4.00
+[PASS] shape builds a real surface -- Sphere/ceil/full: 3312 vertices
+[PASS] shape stays inside its region footprint -- Sphere/full
+[PASS] closed shape spans centre by rise -- Sphere: z -16.00..4.00 want -16.00..4.00
+[PASS] the heap is intact after the shape -- Sphere: z -16.00..4.00 want -16.00..4.00
 [PASS] total cell count preserved -- Bevel: 148383 -> 148383 cells
 [PASS] cells outside the region untouched -- Bevel
 [PASS] the modifier holds its region cells -- Bevel: 28956 cells held
@@ -55,9 +159,16 @@ before: cells=148383 region_cells=715
 [PASS] shape cells keep their identity through base edits -- Bevel 2
 [PASS] shape cells keep their identity through base edits -- Cylinder 3
 [PASS] shape cells keep their identity through base edits -- Sphere 4
-0.196: Save to C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox save_to_file (src/formats/gox.c:259)
-0.241: Saved C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox sys_on_saved (src/system.c:312)
+[PASS] adding a cell inside the region is reported
+[PASS] the surface does not ghost to the new cell -- mesh 3845648702 -> 3845648702
+[PASS] recolouring inside the region stays reported
+[PASS] removing the added cell clears the report
+[PASS] the surface footprint matches its source region -- Slope 1: x -60.00..-43.00 y -5.00..6.00
+[PASS] the surface footprint matches its source region -- Bevel 2: x 40.00..64.00 y -34.00..34.00
+0.198: Save to C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox save_to_file (src/formats/gox.c:259)
+0.244: Saved C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox sys_on_saved (src/system.c:312)
 [PASS] document saved as gox -- C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox
 [PASS] reopen keeps the cell count -- pre=148382 post=148382
 [PASS] reopen keeps every modifier editable -- 4 of 4 modifiers
-== self test: 49 checks, 0 failed ==
+[PASS] reopen keeps the anchor plane and open/closed shape -- 4 of 4 modifiers
+== self test: 160 checks, 0 failed ==

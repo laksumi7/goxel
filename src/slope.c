@@ -33,6 +33,8 @@ typedef struct {
     int   aabb[2][3];
     int   kind;
     int   dir;
+    int   anchor;
+    int   closed;
     float rise;
 } slope_saved_t;
 
@@ -43,11 +45,18 @@ static struct {
     layer_t      *mod_layer;   // Layer carrying the modifier being edited.
     slope_saved_t saved;       // Parameters to restore on cancel.
     bool          dragging;
+    bool          conflict;     // Voxel edits happened inside the shape region.
     tool_t       *saved_tool;  // Tool suspended while a handle is dragged.
     int           counter;
 } s = {};
 
 static tool_t s_noop_tool = {.name = "", .flags = 0};
+
+// Allocation accounting for the stress test: every mesh this module makes has
+// to be handed back, so a leak shows up as a live count that never comes down.
+static long s_mesh_live = 0;
+static long s_mesh_made = 0;
+static void free_mesh(model3d_t *mo);
 
 static bool suggest_region(int aabb[2][3]);
 static void select_box(const int aabb[2][3]);
@@ -79,6 +88,8 @@ slope_mod_t *slope_new(void)
     slope_mod_t *m = calloc(1, sizeof(*m));
     m->kind = SLOPE_KIND_SLOPE;
     m->dir = SLOPE_DIR_PX;
+    m->anchor = SLOPE_ANCHOR_FLOOR;
+    m->closed = 0;
     m->rise = 1;
     m->revision = 1;
     vec4_set(m->color, 255, 0, 255, 255);
@@ -93,6 +104,8 @@ slope_mod_t *slope_copy(const slope_mod_t *other)
     memcpy(m->aabb, other->aabb, sizeof(m->aabb));
     m->kind = other->kind;
     m->dir = other->dir;
+    m->anchor = other->anchor;
+    m->closed = other->closed;
     m->rise = other->rise;
     m->revision = other->revision;
     vec4_copy(other->color, m->color);
@@ -102,7 +115,13 @@ slope_mod_t *slope_copy(const slope_mod_t *other)
 void slope_free(slope_mod_t *mod)
 {
     if (!mod) return;
-    if (mod->mesh && goxel.graphics_initialized) model3d_delete(mod->mesh);
+    // The mesh is CPU memory; only its VBO needs a live GL context, so free it
+    // either way rather than leaking it when the graphics are not up.
+    if (mod->mesh) {
+        if (goxel.graphics_initialized) model3d_delete(mod->mesh);
+        else free_mesh(mod->mesh);
+        mod->mesh = NULL;
+    }
     free(mod);
 }
 
@@ -113,6 +132,8 @@ uint32_t slope_hash(const slope_mod_t *mod)
     key = XXH32(&mod->aabb, sizeof(mod->aabb), key);
     key = XXH32(&mod->kind, sizeof(mod->kind), key);
     key = XXH32(&mod->dir, sizeof(mod->dir), key);
+    key = XXH32(&mod->anchor, sizeof(mod->anchor), key);
+    key = XXH32(&mod->closed, sizeof(mod->closed), key);
     key = XXH32(&mod->rise, sizeof(mod->rise), key);
     key = XXH32(&mod->revision, sizeof(mod->revision), key);
     key = XXH32(&mod->color, sizeof(mod->color), key);
@@ -215,26 +236,37 @@ static void add_tri(model3d_t *mo, int *vi, const float a[3], const float b[3],
     }
 }
 
-#define SLOPE_ARC_SEG   24  // Segments across a cylinder arch or a dome.
-#define SLOPE_DOME_SEG  24  // Segments around a dome.
+#define SLOPE_ARC_SEG   24  // Segments across a half arch; a full barrel doubles it.
+#define SLOPE_DOME_SEG  24  // Segments around a dome or ellipsoid.
 #define SLOPE_DOME_RINGS 12 // Rings from the base of a dome to its top.
 
 // The frame every shape builder shares: the region footprint in world axes
 // (inflated by SLOPE_EPS so it covers the neighbouring cube faces instead of
-// z-fighting with them), the run/cross axes and the two planes between which
-// the surface is built.  Every kind stands on the region's bottom plane, so a
-// shape can never dip under the model it was made from.
+// z-fighting with them), the run/cross axes, and the planes the surface is
+// measured from.  `anchor` decides which region plane that is, so a shape is
+// not stuck growing upwards: a hull side can slope inwards, a barrel can lie
+// across the ship, a casing can hang from the deck.
 typedef struct {
     int run, cross, sign;
+    int anchor, closed;
+    int spans;            // the shape is centred on `centre` (barrel, ellipsoid)
     float lo[3], hi[3];
     float r_lo, r_hi;     // run coordinate of the low and the high edge
     float c_lo, c_hi;
-    float bottom, low, top, rise;
+    float base;           // plane an open shape is measured from
+    float seal;           // the flat cap the skirts close against
+    float centre;         // plane a closed shape is centred on
+    float crown;          // the extreme point of the generated face
+    float rise;
+    int dirz;             // +1 grows up from the base, -1 hangs down from it
 } surf_frame_t;
 
 static void surf_frame(const slope_mod_t *m, surf_frame_t *f)
 {
+    const float floor_p = m->aabb[0][SLOPE_UP];
+    const float ceil_p = m->aabb[1][SLOPE_UP] + 1.f;
     int i;
+
     run_axes(m->dir, &f->run, &f->cross, &f->sign);
     for (i = 0; i < 3; i++) {
         f->lo[i] = m->aabb[0][i];
@@ -242,76 +274,120 @@ static void surf_frame(const slope_mod_t *m, surf_frame_t *f)
     }
     f->lo[f->run] -= SLOPE_EPS;   f->hi[f->run] += SLOPE_EPS;
     f->lo[f->cross] -= SLOPE_EPS; f->hi[f->cross] += SLOPE_EPS;
-    f->bottom = m->aabb[0][SLOPE_UP] - SLOPE_EPS;
-    f->low = m->aabb[0][SLOPE_UP];
+    f->anchor = m->anchor;
+    f->closed = m->closed;
     f->rise = m->rise;
-    f->top = m->aabb[0][SLOPE_UP] + m->rise;
+
+    switch (m->anchor) {
+    case SLOPE_ANCHOR_CEIL:
+        f->base = ceil_p;
+        f->dirz = -1;
+        f->centre = ceil_p - m->rise;
+        break;
+    case SLOPE_ANCHOR_MID:
+        f->base = (floor_p + ceil_p) * 0.5f - m->rise * 0.5f;
+        f->dirz = +1;
+        f->centre = (floor_p + ceil_p) * 0.5f;
+        break;
+    default:
+        f->base = floor_p;
+        f->dirz = +1;
+        f->centre = floor_p + m->rise;
+        break;
+    }
+    // The solid is the slab between the anchor plane and the generated face,
+    // nudged a hair past the plane so it does not z-fight with the neighbouring
+    // cubes.  Keeping the slab against its own plane is what makes every kind
+    // watertight: the skirts and the cap always close against that plane.
+    f->seal = f->base - f->dirz * SLOPE_EPS;
+    // Only a barrel or an ellipsoid is centred on its anchor plane; a plane or
+    // a chamfer is measured from it whatever `closed` means for that kind.
+    f->spans = m->closed && (m->kind == SLOPE_KIND_CYLINDER ||
+                             m->kind == SLOPE_KIND_SPHERE);
+    f->crown = f->spans ? f->centre + m->rise : f->base + f->dirz * m->rise;
     f->r_lo = (f->sign > 0) ? f->lo[f->run] : f->hi[f->run];
     f->r_hi = (f->sign > 0) ? f->hi[f->run] : f->lo[f->run];
     f->c_lo = f->lo[f->cross];
     f->c_hi = f->hi[f->cross];
 }
 
-static void add_bottom(const surf_frame_t *f, model3d_t *mo, int *vi)
+// World height of a point `h` away from the anchor plane: upwards for a shape
+// that stands on it, downwards for one that hangs from it.
+static float surf_h(const surf_frame_t *f, float h)
+{
+    return f->base + f->dirz * h;
+}
+
+// The highest (or, for a hanging shape, lowest) point of the generated face.
+static float surf_crown(const surf_frame_t *f)
+{
+    return f->crown;
+}
+
+static void add_cap(const surf_frame_t *f, model3d_t *mo, int *vi)
 {
     float p[4][3], out[3];
-    set_pt(p[0], f->run, f->cross, f->r_lo, f->bottom, f->c_lo);
-    set_pt(p[1], f->run, f->cross, f->r_hi, f->bottom, f->c_lo);
-    set_pt(p[2], f->run, f->cross, f->r_hi, f->bottom, f->c_hi);
-    set_pt(p[3], f->run, f->cross, f->r_lo, f->bottom, f->c_hi);
-    vec3_set(out, 0, 0, 0); out[SLOPE_UP] = -1;
+    set_pt(p[0], f->run, f->cross, f->r_lo, f->seal, f->c_lo);
+    set_pt(p[1], f->run, f->cross, f->r_hi, f->seal, f->c_lo);
+    set_pt(p[2], f->run, f->cross, f->r_hi, f->seal, f->c_hi);
+    set_pt(p[3], f->run, f->cross, f->r_lo, f->seal, f->c_hi);
+    vec3_set(out, 0, 0, 0); out[SLOPE_UP] = -f->dirz;
     add_quad(mo, vi, p, out);
 }
 
-// One planar face, four skirts down to the region bottom, closing bottom.
+// One planar face, four skirts back to the anchor plane, closing cap.
 static void build_slope(const surf_frame_t *f, model3d_t *mo, int *vi)
 {
     float p[4][3], out[3];
+    float h_lo = surf_h(f, 0.f);
+    float h_hi = surf_h(f, f->rise);
 
     // the slope face itself: a single plane, not a staircase
-    set_pt(p[0], f->run, f->cross, f->r_lo, f->low, f->c_lo);
-    set_pt(p[1], f->run, f->cross, f->r_hi, f->top, f->c_lo);
-    set_pt(p[2], f->run, f->cross, f->r_hi, f->top, f->c_hi);
-    set_pt(p[3], f->run, f->cross, f->r_lo, f->low, f->c_hi);
-    vec3_set(out, 0, 0, 0); out[SLOPE_UP] = 1;
+    set_pt(p[0], f->run, f->cross, f->r_lo, h_lo, f->c_lo);
+    set_pt(p[1], f->run, f->cross, f->r_hi, h_hi, f->c_lo);
+    set_pt(p[2], f->run, f->cross, f->r_hi, h_hi, f->c_hi);
+    set_pt(p[3], f->run, f->cross, f->r_lo, h_lo, f->c_hi);
+    vec3_set(out, 0, 0, 0); out[SLOPE_UP] = f->dirz;
     add_quad(mo, vi, p, out);
 
-    // skirt under the high edge
-    set_pt(p[0], f->run, f->cross, f->r_hi, f->top, f->c_lo);
-    set_pt(p[1], f->run, f->cross, f->r_hi, f->bottom, f->c_lo);
-    set_pt(p[2], f->run, f->cross, f->r_hi, f->bottom, f->c_hi);
-    set_pt(p[3], f->run, f->cross, f->r_hi, f->top, f->c_hi);
+    // skirt at the high edge
+    set_pt(p[0], f->run, f->cross, f->r_hi, h_hi, f->c_lo);
+    set_pt(p[1], f->run, f->cross, f->r_hi, f->seal, f->c_lo);
+    set_pt(p[2], f->run, f->cross, f->r_hi, f->seal, f->c_hi);
+    set_pt(p[3], f->run, f->cross, f->r_hi, h_hi, f->c_hi);
     vec3_set(out, 0, 0, 0); out[f->run] = f->sign;
     add_quad(mo, vi, p, out);
 
-    // skirt under the low edge
-    set_pt(p[0], f->run, f->cross, f->r_lo, f->low, f->c_lo);
-    set_pt(p[1], f->run, f->cross, f->r_lo, f->bottom, f->c_lo);
-    set_pt(p[2], f->run, f->cross, f->r_lo, f->bottom, f->c_hi);
-    set_pt(p[3], f->run, f->cross, f->r_lo, f->low, f->c_hi);
+    // skirt at the low edge
+    set_pt(p[0], f->run, f->cross, f->r_lo, h_lo, f->c_lo);
+    set_pt(p[1], f->run, f->cross, f->r_lo, f->seal, f->c_lo);
+    set_pt(p[2], f->run, f->cross, f->r_lo, f->seal, f->c_hi);
+    set_pt(p[3], f->run, f->cross, f->r_lo, h_lo, f->c_hi);
     vec3_set(out, 0, 0, 0); out[f->run] = -f->sign;
     add_quad(mo, vi, p, out);
 
     // skirts on the two cross edges
-    set_pt(p[0], f->run, f->cross, f->r_lo, f->low, f->c_lo);
-    set_pt(p[1], f->run, f->cross, f->r_hi, f->top, f->c_lo);
-    set_pt(p[2], f->run, f->cross, f->r_hi, f->bottom, f->c_lo);
-    set_pt(p[3], f->run, f->cross, f->r_lo, f->bottom, f->c_lo);
+    set_pt(p[0], f->run, f->cross, f->r_lo, h_lo, f->c_lo);
+    set_pt(p[1], f->run, f->cross, f->r_hi, h_hi, f->c_lo);
+    set_pt(p[2], f->run, f->cross, f->r_hi, f->seal, f->c_lo);
+    set_pt(p[3], f->run, f->cross, f->r_lo, f->seal, f->c_lo);
     vec3_set(out, 0, 0, 0); out[f->cross] = -1;
     add_quad(mo, vi, p, out);
 
-    set_pt(p[0], f->run, f->cross, f->r_lo, f->low, f->c_hi);
-    set_pt(p[1], f->run, f->cross, f->r_hi, f->top, f->c_hi);
-    set_pt(p[2], f->run, f->cross, f->r_hi, f->bottom, f->c_hi);
-    set_pt(p[3], f->run, f->cross, f->r_lo, f->bottom, f->c_hi);
+    set_pt(p[0], f->run, f->cross, f->r_lo, h_lo, f->c_hi);
+    set_pt(p[1], f->run, f->cross, f->r_hi, h_hi, f->c_hi);
+    set_pt(p[2], f->run, f->cross, f->r_hi, f->seal, f->c_hi);
+    set_pt(p[3], f->run, f->cross, f->r_lo, f->seal, f->c_hi);
     vec3_set(out, 0, 0, 0); out[f->cross] = 1;
     add_quad(mo, vi, p, out);
 
-    add_bottom(f, mo, vi);
+    add_cap(f, mo, vi);
 }
 
-// A 45 degree chamfer of the region's top edges: the top face is inset by the
-// same distance it is raised, so the skirt is a real bevel and not a step.
+// A chamfer of the region's edges measured from the anchor plane: the face is
+// inset by the same distance it is raised, so the skirt is a real bevel and not
+// a step.  Open chamfers only the edge at the high end of the run (a directed
+// bevel, like a bow cut); closed chamfers all four edges of the face.
 static void build_bevel(const surf_frame_t *f, model3d_t *mo, int *vi)
 {
     float p[4][3], out[3];
@@ -319,69 +395,79 @@ static void build_bevel(const surf_frame_t *f, model3d_t *mo, int *vi)
     float r_max = max(f->lo[f->run], f->hi[f->run]);
     float c_min = min(f->c_lo, f->c_hi);
     float c_max = max(f->c_lo, f->c_hi);
-    float in_r = min(f->rise, (r_max - r_min) * 0.5f);
-    float in_c = min(f->rise, (c_max - c_min) * 0.5f);
+    float in_hi = min(f->rise, (r_max - r_min) * 0.5f);
+    float in_lo = f->closed ? in_hi : 0.f;
+    float in_c  = f->closed ? min(f->rise, (c_max - c_min) * 0.5f) : 0.f;
+    float a_lo = (f->sign > 0) ? in_lo : in_hi;   // inset at r_min
+    float a_hi = (f->sign > 0) ? in_hi : in_lo;   // inset at r_max
+    float h_top = surf_h(f, f->rise);
 
-    // top face
-    set_pt(p[0], f->run, f->cross, r_min + in_r, f->top, c_min + in_c);
-    set_pt(p[1], f->run, f->cross, r_max - in_r, f->top, c_min + in_c);
-    set_pt(p[2], f->run, f->cross, r_max - in_r, f->top, c_max - in_c);
-    set_pt(p[3], f->run, f->cross, r_min + in_r, f->top, c_max - in_c);
-    vec3_set(out, 0, 0, 0); out[SLOPE_UP] = 1;
+    // the chamfered face
+    set_pt(p[0], f->run, f->cross, r_min + a_lo, h_top, c_min + in_c);
+    set_pt(p[1], f->run, f->cross, r_max - a_hi, h_top, c_min + in_c);
+    set_pt(p[2], f->run, f->cross, r_max - a_hi, h_top, c_max - in_c);
+    set_pt(p[3], f->run, f->cross, r_min + a_lo, h_top, c_max - in_c);
+    vec3_set(out, 0, 0, 0); out[SLOPE_UP] = f->dirz;
     add_quad(mo, vi, p, out);
 
-    // four chamfered skirts
-    set_pt(p[0], f->run, f->cross, r_min, f->bottom, c_min);
-    set_pt(p[1], f->run, f->cross, r_min + in_r, f->top, c_min + in_c);
-    set_pt(p[2], f->run, f->cross, r_max - in_r, f->top, c_min + in_c);
-    set_pt(p[3], f->run, f->cross, r_max, f->bottom, c_min);
+    // the four skirts between that face and the anchor plane
+    set_pt(p[0], f->run, f->cross, r_min, f->seal, c_min);
+    set_pt(p[1], f->run, f->cross, r_min + a_lo, h_top, c_min + in_c);
+    set_pt(p[2], f->run, f->cross, r_max - a_hi, h_top, c_min + in_c);
+    set_pt(p[3], f->run, f->cross, r_max, f->seal, c_min);
     vec3_set(out, 0, 0, 0); out[f->cross] = -1;
     add_quad(mo, vi, p, out);
 
-    set_pt(p[0], f->run, f->cross, r_min, f->bottom, c_max);
-    set_pt(p[1], f->run, f->cross, r_min + in_r, f->top, c_max - in_c);
-    set_pt(p[2], f->run, f->cross, r_max - in_r, f->top, c_max - in_c);
-    set_pt(p[3], f->run, f->cross, r_max, f->bottom, c_max);
+    set_pt(p[0], f->run, f->cross, r_min, f->seal, c_max);
+    set_pt(p[1], f->run, f->cross, r_min + a_lo, h_top, c_max - in_c);
+    set_pt(p[2], f->run, f->cross, r_max - a_hi, h_top, c_max - in_c);
+    set_pt(p[3], f->run, f->cross, r_max, f->seal, c_max);
     vec3_set(out, 0, 0, 0); out[f->cross] = 1;
     add_quad(mo, vi, p, out);
 
-    set_pt(p[0], f->run, f->cross, r_min, f->bottom, c_min);
-    set_pt(p[1], f->run, f->cross, r_min + in_r, f->top, c_min + in_c);
-    set_pt(p[2], f->run, f->cross, r_min + in_r, f->top, c_max - in_c);
-    set_pt(p[3], f->run, f->cross, r_min, f->bottom, c_max);
+    set_pt(p[0], f->run, f->cross, r_min, f->seal, c_min);
+    set_pt(p[1], f->run, f->cross, r_min + a_lo, h_top, c_min + in_c);
+    set_pt(p[2], f->run, f->cross, r_min + a_lo, h_top, c_max - in_c);
+    set_pt(p[3], f->run, f->cross, r_min, f->seal, c_max);
     vec3_set(out, 0, 0, 0); out[f->run] = -1;
     add_quad(mo, vi, p, out);
 
-    set_pt(p[0], f->run, f->cross, r_max, f->bottom, c_min);
-    set_pt(p[1], f->run, f->cross, r_max - in_r, f->top, c_min + in_c);
-    set_pt(p[2], f->run, f->cross, r_max - in_r, f->top, c_max - in_c);
-    set_pt(p[3], f->run, f->cross, r_max, f->bottom, c_max);
+    set_pt(p[0], f->run, f->cross, r_max, f->seal, c_min);
+    set_pt(p[1], f->run, f->cross, r_max - a_hi, h_top, c_min + in_c);
+    set_pt(p[2], f->run, f->cross, r_max - a_hi, h_top, c_max - in_c);
+    set_pt(p[3], f->run, f->cross, r_max, f->seal, c_max);
     vec3_set(out, 0, 0, 0); out[f->run] = 1;
     add_quad(mo, vi, p, out);
 
-    add_bottom(f, mo, vi);
+    add_cap(f, mo, vi);
 }
 
-// A half-cylinder arch across the cross axis, extruded along the run axis.
+// Across the cross axis: an arch spanning the region when open, a full barrel
+// of radius `rise` when closed, extruded along the run axis.
 static void build_cylinder(const surf_frame_t *f, model3d_t *mo, int *vi)
 {
-    float arc[SLOPE_ARC_SEG + 1][3];
+    const bool full = f->spans != 0;
+    const int seg = full ? SLOPE_ARC_SEG * 2 : SLOPE_ARC_SEG;
+    const float span = full ? 2 * M_PI : M_PI;
+    const float zc = full ? f->centre : surf_h(f, 0.f);
+    const float crad = full ? f->rise
+                            : fabsf(f->c_hi - f->c_lo) * 0.5f;
+    float arc[SLOPE_ARC_SEG * 2 + 1][3];
     float out[3], pivot[3];
     float r_a = f->lo[f->run], r_b = f->hi[f->run];
     float c_mid = (f->c_lo + f->c_hi) * 0.5f;
-    float c_rad = fabsf(f->c_hi - f->c_lo) * 0.5f;
     int k;
 
-    for (k = 0; k <= SLOPE_ARC_SEG; k++) {
-        float ang = M_PI * k / SLOPE_ARC_SEG;
+    for (k = 0; k <= seg; k++) {
+        float ang = span * k / seg;
         set_pt(arc[k], f->run, f->cross, 0.f,
-               f->bottom + f->rise * sinf(ang),
-               c_mid + c_rad * cosf(ang));
+               zc + f->rise * sinf(ang) * (f->dirz < 0 ? -1.f : 1.f),
+               c_mid + crad * cosf(ang));
     }
 
-    // the arch itself, as a quad strip
-    for (k = 0; k < SLOPE_ARC_SEG; k++) {
-        float ang = M_PI * (k + 0.5f) / SLOPE_ARC_SEG;
+    // the barrel or arch wall, as a quad strip
+    for (k = 0; k < seg; k++) {
+        float ang = span * (k + 0.5f) / seg;
         float q[4][3];
         set_pt(q[0], f->run, f->cross, r_a, arc[k][SLOPE_UP], arc[k][f->cross]);
         set_pt(q[1], f->run, f->cross, r_b, arc[k][SLOPE_UP], arc[k][f->cross]);
@@ -389,30 +475,38 @@ static void build_cylinder(const surf_frame_t *f, model3d_t *mo, int *vi)
         set_pt(q[3], f->run, f->cross, r_a, arc[k+1][SLOPE_UP], arc[k+1][f->cross]);
         vec3_set(out, 0, 0, 0);
         out[f->cross] = cosf(ang);
-        out[SLOPE_UP] = sinf(ang);
+        out[SLOPE_UP] = sinf(ang) * (f->dirz < 0 ? -1.f : 1.f);
         add_quad(mo, vi, q, out);
     }
 
-    // the two half-ellipse ends, as fans from the arch pivot
+    // the two ends, as fans from the section's pivot
     vec3_set(pivot, 0, 0, 0);
     pivot[f->run] = r_a;
     pivot[f->cross] = c_mid;
-    pivot[SLOPE_UP] = f->bottom;
+    pivot[SLOPE_UP] = zc;
     vec3_set(out, 0, 0, 0); out[f->run] = -1;
-    for (k = 0; k < SLOPE_ARC_SEG; k++)
+    for (k = 0; k < seg; k++)
         add_tri(mo, vi, pivot, arc[k], arc[k+1], out);
 
     pivot[f->run] = r_b;
     vec3_set(out, 0, 0, 0); out[f->run] = 1;
-    for (k = 0; k < SLOPE_ARC_SEG; k++)
+    for (k = 0; k < seg; k++)
         add_tri(mo, vi, pivot, arc[k], arc[k+1], out);
 
-    add_bottom(f, mo, vi);
+    // a full barrel is already closed; an arch needs its cap
+    if (!full)
+        add_cap(f, mo, vi);
 }
 
-// A dome: an elliptical shell over the region footprint, closed underneath.
+// Over the region footprint: a dome when open, a full ellipsoid when closed.
 static void build_sphere(const surf_frame_t *f, model3d_t *mo, int *vi)
 {
+    const bool full = f->spans != 0;
+    const int rings = full ? SLOPE_DOME_RINGS * 2 : SLOPE_DOME_RINGS;
+    const float u_from = full ? -M_PI / 2 : 0.f;
+    const float u_span = full ? M_PI : M_PI / 2;
+    const float zc = full ? f->centre : surf_h(f, 0.f);
+    const float sgn = (full || f->dirz > 0) ? 1.f : -1.f;
     float out[3], center[3], cur[SLOPE_DOME_SEG][3], nxt[SLOPE_DOME_SEG][3];
     float r_mid = (f->lo[f->run] + f->hi[f->run]) * 0.5f;
     float c_mid = (f->c_lo + f->c_hi) * 0.5f;
@@ -424,39 +518,42 @@ static void build_sphere(const surf_frame_t *f, model3d_t *mo, int *vi)
     vec3_set(center, 0, 0, 0);
     center[f->run] = r_mid;
     center[f->cross] = c_mid;
-    center[SLOPE_UP] = f->bottom;
+    center[SLOPE_UP] = zc;
 
-    for (ring = 0; ring < SLOPE_DOME_RINGS; ring++) {
-        float u0 = (M_PI / 2) * ring / SLOPE_DOME_RINGS;
-        float u1 = (M_PI / 2) * (ring + 1) / SLOPE_DOME_RINGS;
-        bool top = (ring == SLOPE_DOME_RINGS - 1);
+    for (ring = 0; ring < rings; ring++) {
+        float u0 = u_from + u_span * ring / rings;
+        float u1 = u_from + u_span * (ring + 1) / rings;
         float s0 = cosf(u0), s1 = cosf(u1);
+        bool pole_lo = fabsf(s0) < 1e-6f;   // the ring has collapsed to a point
+        bool pole_hi = fabsf(s1) < 1e-6f;
 
         for (k = 0; k < SLOPE_DOME_SEG; k++) {
             float a0 = 2 * M_PI * k / SLOPE_DOME_SEG;
             float a1 = 2 * M_PI * (k + 1) / SLOPE_DOME_SEG;
             set_pt(cur[k], f->run, f->cross,
                    r_mid + rad_r * s0 * cosf(a0),
-                   f->bottom + f->rise * sinf(u0),
+                   zc + f->rise * sinf(u0) * sgn,
                    c_mid + rad_c * s0 * sinf(a0));
-            // the crown ring collapses onto the top point
             set_pt(nxt[k], f->run, f->cross,
-                   r_mid + (top ? 0.f : rad_r * s1 * cosf(a1)),
-                   f->bottom + f->rise * sinf(u1),
-                   c_mid + (top ? 0.f : rad_c * s1 * sinf(a1)));
+                   r_mid + rad_r * s1 * cosf(a1),
+                   zc + f->rise * sinf(u1) * sgn,
+                   c_mid + rad_c * s1 * sinf(a1));
         }
         for (k = 0; k < SLOPE_DOME_SEG; k++) {
             int nk = (k + 1) % SLOPE_DOME_SEG;
-            if (top) {
+            if (pole_hi) {
                 vec3_sub(nxt[k], center, out);
                 add_tri(mo, vi, cur[k], nxt[k], cur[nk], out);
+            } else if (pole_lo) {
+                vec3_sub(nxt[k], center, out);
+                add_tri(mo, vi, cur[k], nxt[k], nxt[nk], out);
             } else {
                 float q[4][3];
                 float a0 = 2 * M_PI * (k + 0.5f) / SLOPE_DOME_SEG;
                 vec3_set(out, 0, 0, 0);
                 out[f->run]   = s0 * cosf(a0) / rad_r;
                 out[f->cross] = s0 * sinf(a0) / rad_c;
-                out[SLOPE_UP] = sinf(u0) / h;
+                out[SLOPE_UP] = sinf(u0) * sgn / h;
                 vec3_copy(cur[k], q[0]);
                 vec3_copy(nxt[k], q[1]);
                 vec3_copy(nxt[nk], q[2]);
@@ -466,16 +563,18 @@ static void build_sphere(const surf_frame_t *f, model3d_t *mo, int *vi)
         }
     }
 
-    // close the base so the dome is a solid
-    for (k = 0; k < SLOPE_DOME_SEG; k++) {
-        float a0 = 2 * M_PI * k / SLOPE_DOME_SEG;
-        set_pt(cur[k], f->run, f->cross,
-               r_mid + rad_r * cosf(a0), f->bottom, c_mid + rad_c * sinf(a0));
-    }
-    for (k = 0; k < SLOPE_DOME_SEG; k++) {
-        vec3_set(out, 0, 0, 0);
-        out[SLOPE_UP] = -1;
-        add_tri(mo, vi, center, cur[k], cur[(k + 1) % SLOPE_DOME_SEG], out);
+    // a full ellipsoid closes on itself; a dome needs its base
+    if (!full) {
+        for (k = 0; k < SLOPE_DOME_SEG; k++) {
+            float a0 = 2 * M_PI * k / SLOPE_DOME_SEG;
+            set_pt(cur[k], f->run, f->cross,
+                   r_mid + rad_r * cosf(a0), zc, c_mid + rad_c * sinf(a0));
+        }
+        for (k = 0; k < SLOPE_DOME_SEG; k++) {
+            vec3_set(out, 0, 0, 0);
+            out[SLOPE_UP] = -f->dirz;
+            add_tri(mo, vi, center, cur[k], cur[(k + 1) % SLOPE_DOME_SEG], out);
+        }
     }
 }
 
@@ -489,9 +588,18 @@ static model3d_t *build_mesh(const slope_mod_t *m)
 
     switch (m->kind) {
     case SLOPE_KIND_BEVEL:    cap = 6 * 6; break;
-    case SLOPE_KIND_CYLINDER: cap = SLOPE_ARC_SEG * 6 + 2 * SLOPE_ARC_SEG * 3 + 6; break;
-    case SLOPE_KIND_SPHERE:   cap = (SLOPE_DOME_RINGS - 1) * SLOPE_DOME_SEG * 6 +
-                                    2 * SLOPE_DOME_SEG * 3; break;
+    case SLOPE_KIND_CYLINDER:
+        cap = m->closed
+                ? (SLOPE_ARC_SEG * 2) * 6 + 2 * (SLOPE_ARC_SEG * 2) * 3
+                : SLOPE_ARC_SEG * 6 + 2 * SLOPE_ARC_SEG * 3 + 6;
+        break;
+    case SLOPE_KIND_SPHERE:
+        cap = m->closed
+                ? (SLOPE_DOME_RINGS * 2 - 2) * SLOPE_DOME_SEG * 6 +
+                  2 * SLOPE_DOME_SEG * 3
+                : (SLOPE_DOME_RINGS - 1) * SLOPE_DOME_SEG * 6 +
+                  2 * SLOPE_DOME_SEG * 3;
+        break;
     default:                  cap = 6 * 6; break;
     }
 
@@ -500,6 +608,8 @@ static model3d_t *build_mesh(const slope_mod_t *m)
     mo->cull = true;
     mo->dirty = true;
     s_vert_budget = cap;
+    s_mesh_live++;
+    s_mesh_made++;
 
     switch (m->kind) {
     case SLOPE_KIND_BEVEL:    build_bevel(&f, mo, &vi); break;
@@ -513,6 +623,16 @@ static model3d_t *build_mesh(const slope_mod_t *m)
     assert(vi <= cap);
     mo->nb_vertices = vi;
     return mo;
+}
+
+// Release a mesh built here and keep the live count honest.  model3d_delete
+// does the same frees; this one also tracks them.
+static void free_mesh(model3d_t *mo)
+{
+    if (!mo) return;
+    free(mo->vertices);
+    free(mo);
+    s_mesh_live--;
 }
 
 static void region_color(const volume_t *vol, const int aabb[2][3],
@@ -538,13 +658,54 @@ static void region_color(const volume_t *vol, const int aabb[2][3],
     color[3] = 255;
 }
 
+// #### Conflict with ordinary voxel edits ###############################
+// The generated surface is built from the region box, not from whichever cells
+// happen to sit in it.  Painting inside a shape's region therefore cannot move
+// the surface, so it has to be reported rather than silently swallowed.
+static uint32_t cells_hash_in_region(const layer_t *layer, const int aabb[2][3])
+{
+    volume_iterator_t iter;
+    uint8_t c[4];
+    int p[3], i;
+    uint32_t key = 0;
+
+    iter = volume_get_iterator(layer->volume,
+                               VOLUME_ITER_VOXELS | VOLUME_ITER_SKIP_EMPTY);
+    while (volume_iter(&iter, p)) {
+        bool inside = true;
+        for (i = 0; i < 3; i++) {
+            if (p[i] < aabb[0][i] || p[i] > aabb[1][i]) { inside = false; break; }
+        }
+        if (!inside) continue;
+        volume_get_at(layer->volume, &iter, p, c);
+        if (!c[3]) continue;
+        key = XXH32(p, sizeof(p), key);
+        key = XXH32(c, sizeof(c), key);
+    }
+    return key;
+}
+
+// True when a shape's own layer no longer holds the cells it held when the
+// shape was applied.
+static bool slope_conflict(const layer_t *layer)
+{
+    uint32_t h;
+    if (!layer || !layer->slope) return false;
+    h = cells_hash_in_region(layer, layer->slope->aabb);
+    if (layer->slope->applied_hash == 0) {
+        ((slope_mod_t *)layer->slope)->applied_hash = h;
+        return false;
+    }
+    return h != layer->slope->applied_hash;
+}
+
 static void ensure_mesh(layer_t *layer)
 {
     slope_mod_t *m = layer->slope;
     uint32_t hash = slope_hash(m);
     if (m->mesh && m->mesh_hash == hash) return;
     if (m->mesh) {
-        model3d_delete(m->mesh);
+        free_mesh(m->mesh);
         m->mesh = NULL;
     }
     m->mesh = build_mesh(m);
@@ -588,18 +749,19 @@ void slope_render(void)
 
 static void handle_pos(const slope_mod_t *m, float out[3])
 {
-    int run, cross, sign;
-    run_axes(m->dir, &run, &cross, &sign);
+    surf_frame_t f;
+    surf_frame(m, &f);
     vec3_set(out, 0, 0, 0);
     if (m->kind == SLOPE_KIND_SLOPE) {
         // On the high edge, where a plane is obviously being pulled up.
-        out[run] = (sign > 0) ? m->aabb[1][run] + 1.f : (float)m->aabb[0][run];
+        out[f.run] = (f.sign > 0) ? m->aabb[1][f.run] + 1.f
+                                  : (float)m->aabb[0][f.run];
     } else {
-        // On the crown of the arch, dome or chamfer.
-        out[run] = (m->aabb[0][run] + m->aabb[1][run] + 1.f) / 2.f;
+        // On the crown of the arch, barrel, dome or chamfer.
+        out[f.run] = (m->aabb[0][f.run] + m->aabb[1][f.run] + 1.f) / 2.f;
     }
-    out[cross] = (m->aabb[0][cross] + m->aabb[1][cross] + 1.f) / 2.f;
-    out[SLOPE_UP] = m->aabb[0][SLOPE_UP] + m->rise;
+    out[f.cross] = (m->aabb[0][f.cross] + m->aabb[1][f.cross] + 1.f) / 2.f;
+    out[SLOPE_UP] = surf_crown(&f);
 }
 
 const char *slope_kind_name(int kind)
@@ -686,6 +848,8 @@ static void save_params(slope_saved_t *dst, const slope_mod_t *m)
     memcpy(dst->aabb, m->aabb, sizeof(m->aabb));
     dst->kind = m->kind;
     dst->dir = m->dir;
+    dst->anchor = m->anchor;
+    dst->closed = m->closed;
     dst->rise = m->rise;
 }
 
@@ -694,6 +858,8 @@ static void restore_params(slope_mod_t *m, const slope_saved_t *src)
     memcpy(m->aabb, src->aabb, sizeof(m->aabb));
     m->kind = src->kind;
     m->dir = src->dir;
+    m->anchor = src->anchor;
+    m->closed = src->closed;
     m->rise = src->rise;
     m->revision++;
 }
@@ -720,6 +886,7 @@ static void end_session(void)
     s.mod_layer = NULL;
     s.src_layer = NULL;
     s.dragging = false;
+    s.conflict = false;
     if (s.src_backup) {
         volume_delete(s.src_backup);
         s.src_backup = NULL;
@@ -743,7 +910,12 @@ static void apply_session(void)
         s.mod_layer->slope->revision++;
         region_color(s.mod_layer->volume, s.mod_layer->slope->aabb,
                      s.mod_layer->slope->color);
+        // Remember the cells this shape was derived from, so a later voxel edit
+        // inside the region can be reported instead of silently ignored.
+        s.mod_layer->slope->applied_hash =
+            cells_hash_in_region(s.mod_layer, s.mod_layer->slope->aabb);
     }
+    s.conflict = false;
     end_session();
     image_history_push(goxel.image);
 }
@@ -848,6 +1020,10 @@ void slope_iter(const inputs_t *inputs, const float viewport[4])
     slope_demo_step();
     if (!s.mode || !s.mod_layer) return;
     m = s.mod_layer->slope;
+    // Watching for ordinary voxel edits inside the region: hashing a big layer
+    // every frame would not be free, so this runs a few times a second.
+    if (goxel.frame_count % 20 == 0)
+        s.conflict = slope_conflict(s.mod_layer);
     handle_pos(m, h);
     camera_project(goxel.image->active_camera, h, viewport, sp);
     mx = inputs->touches[0].pos[0];
@@ -874,7 +1050,7 @@ void slope_iter(const inputs_t *inputs, const float viewport[4])
 
     // Intersect the mouse ray with the vertical plane that contains the run
     // axis, so the handle only moves the height.
-    vec3_set(win, mx, my, 0);
+    vec2_set(win, mx, my);
     camera_get_ray(goxel.image->active_camera, win, viewport, o, d);
     run_axes(m->dir, &run, &cross, &sign);
     up[SLOPE_UP] = 1;
@@ -884,8 +1060,15 @@ void slope_iter(const inputs_t *inputs, const float viewport[4])
     if (!plane_line_intersection(plane, o, d, local)) return;
     mat4_mul_vec3(plane, local, world);
 
-    // `rise` is measured from the region bottom, matching build_mesh().
-    rise = world[SLOPE_UP] - m->aabb[0][SLOPE_UP];
+    // `rise` is measured from the anchor plane, matching surf_frame(): upwards
+    // for a shape standing on it, downwards for one hanging from it, and away
+    // from the centre plane for a closed shape.
+    {
+        surf_frame_t fr;
+        surf_frame(m, &fr);
+        rise = fr.spans ? fabsf(world[SLOPE_UP] - fr.centre)
+                        : (world[SLOPE_UP] - fr.base) * fr.dirz;
+    }
     lo = 0.25f;
     hi = 2.f * (m->aabb[1][SLOPE_UP] - m->aabb[0][SLOPE_UP] + 1.f);
     s.mod_layer->slope->rise = clamp(rise, lo, hi);
@@ -915,6 +1098,7 @@ void slope_gui(void)
     float pos[2];
     slope_mod_t *m = NULL;
     static const char *DIR_NAMES[SLOPE_DIR_COUNT] = {"+X", "-X", "+Y", "-Y"};
+    static const char *ANCHOR_NAMES[SLOPE_ANCHOR_COUNT] = {"Floor", "Mid", "Ceil"};
     int i;
 
     if (!s.mode && active && active->slope) begin_edit_slope(active);
@@ -971,6 +1155,23 @@ void slope_gui(void)
         m->revision++;
     }
     gui_row_end();
+    gui_row_begin(3);
+    for (i = 0; i < SLOPE_ANCHOR_COUNT; i++) {
+        if (gui_button(ANCHOR_NAMES[i], 0, 0) && m->anchor != i) {
+            m->anchor = i;
+            m->revision++;
+        }
+    }
+    gui_row_end();
+    {
+        bool full = (m->closed != 0);
+        if (gui_checkbox("Full shape", &full,
+                         "Barrel / ellipsoid / all-edge chamfer instead of "
+                         "an arch, dome or single chamfer")) {
+            m->closed = full ? 1 : 0;
+            m->revision++;
+        }
+    }
     gui_row_begin(4);
     for (i = 0; i < SLOPE_DIR_COUNT; i++) {
         if (gui_button(DIR_NAMES[i], 0, 0) && m->dir != i) {
@@ -994,6 +1195,9 @@ void slope_gui(void)
     }
     gui_row_end();
     gui_text("Drag the yellow handle in the view");
+    if (s.conflict)
+        gui_text("Cells inside this region changed after the shape was applied;"
+                 " the surface follows the region, not those cells");
     gui_window_end();
 }
 
@@ -1005,6 +1209,10 @@ void slope_gui(void)
 
 static bool s_demo = false;
 static bool s_shape_demo = false;
+static bool s_place_demo = false;
+static int s_place_next = 0;
+static layer_t *s_place_last = NULL;
+static int s_place_aabb[8][2][3];
 static layer_t *s_demo_layer = NULL;
 static layer_t *s_demo_base = NULL;
 static int s_shape_next = 0;
@@ -1018,6 +1226,12 @@ void slope_demo_begin_shapes(void)
 {
     s_demo = true;
     s_shape_demo = true;
+}
+
+void slope_demo_begin_placement(void)
+{
+    s_demo = true;
+    s_place_demo = true;
 }
 
 // Put the camera at a known orientation: Goxel's default is a top view, so
@@ -1130,6 +1344,177 @@ static void shapes_step(void)
     }
 }
 
+// #### Placement demo (AMFM #534 P0.2) ################################
+// `anchor` and `closed` exist so a shape is not stuck growing upwards out of a
+// box.  This drives five different placements on the real ship, each shot from
+// the view that shows it best, so the freedom can be judged rather than taken
+// on trust.
+typedef struct {
+    int kind, dir, anchor, closed;
+    float rise;
+    int pc[6][2];         // region as a percentage of the model bbox, per axis
+    float rz, rx;         // the camera that shows it best
+    const char *label;
+} place_step_t;
+
+static const place_step_t PLACE[] = {
+    { SLOPE_KIND_SLOPE, SLOPE_DIR_PX, SLOPE_ANCHOR_FLOOR, 0, 32.f,
+      {{0, 16}, {0, 100}, {0, 100}}, 0.f, 1.5708f,
+      "bow plane rising from the keel" },
+    { SLOPE_KIND_SLOPE, SLOPE_DIR_PY, SLOPE_ANCHOR_CEIL, 0, 16.f,
+      {{20, 36}, {50, 100}, {45, 100}}, 1.5708f, 1.5708f,
+      "hull side falling away from the deck" },
+    { SLOPE_KIND_CYLINDER, SLOPE_DIR_PX, SLOPE_ANCHOR_MID, 1, 14.f,
+      {{36, 60}, {0, 100}, {45, 100}}, 1.5708f, 1.5708f,
+      "full barrel lying along the ship" },
+    { SLOPE_KIND_SPHERE, SLOPE_DIR_PY, SLOPE_ANCHOR_MID, 1, 12.f,
+      {{62, 80}, {15, 85}, {40, 100}}, .7f, 1.05f,
+      "rounded casing centred in its region" },
+    { SLOPE_KIND_BEVEL, SLOPE_DIR_PX, SLOPE_ANCHOR_FLOOR, 0, 12.f,
+      {{84, 100}, {0, 100}, {45, 100}}, 0.f, 1.5708f,
+      "single directed chamfer on the stern edge" },
+};
+#define PLACE_NB ((int)(sizeof(PLACE) / sizeof(PLACE[0])))
+
+static bool place_region(const place_step_t *st, int aabb[2][3])
+{
+    int bbox[2][3], i;
+    if (!volume_get_bbox(goxel_get_layers_volume(goxel.image), bbox, true))
+        return false;
+    for (i = 0; i < 3; i++) {
+        const int len = bbox[1][i] - bbox[0][i] + 1;
+        aabb[0][i] = bbox[0][i] + (len * st->pc[i][0]) / 100;
+        aabb[1][i] = bbox[0][i] + (len * st->pc[i][1]) / 100 - 1;
+        if (aabb[1][i] <= aabb[0][i]) return false;
+    }
+    return true;
+}
+
+// Numeric proof of where a generated surface actually ended up.  The render is
+// supporting evidence; these bounds are the claim.
+static void print_shape_bounds(const slope_mod_t *m)
+{
+    model3d_t *mo = build_mesh(m);
+    float mn[3] = { 1e9f, 1e9f, 1e9f }, mx[3] = { -1e9f, -1e9f, -1e9f };
+    int v, i;
+
+    for (v = 0; v < mo->nb_vertices; v++) {
+        const float *p = mo->vertices[v].pos;
+        for (i = 0; i < 3; i++) {
+            mn[i] = min(mn[i], p[i]);
+            mx[i] = max(mx[i], p[i]);
+        }
+    }
+    printf("         mesh %d verts: x %.1f..%.1f y %.1f..%.1f z %.1f..%.1f\n",
+           mo->nb_vertices, mn[0], mx[0], mn[1], mx[1], mn[2], mx[2]);
+    fflush(stdout);
+    free_mesh(mo);
+}
+
+// Isolate one layer so a render shows the generated surface on its own, with
+// the ship's own art out of the way.
+static void show_only(const layer_t *keep)
+{
+    layer_t *l;
+    DL_FOREACH(goxel.image->layers, l) l->visible = (l == keep);
+}
+
+static void show_all(void)
+{
+    layer_t *l;
+    DL_FOREACH(goxel.image->layers, l) l->visible = true;
+}
+
+static void place_step(void)
+{
+    const int nb = PLACE_NB;
+    int f = goxel.frame_count;
+    camera_t *cam = goxel.image->active_camera;
+    int i;
+
+    if (f == 20) {
+        s_demo_base = goxel.image->active_layer;
+        set_view(cam, .7f, 1.05f);
+    }
+
+    for (i = 0; i < nb; i++) {
+        const int begin = 40 + i * 90;
+        if (f == begin && s_place_next == i) {
+            int aabb[2][3];
+            show_all();   // the region is measured from the whole model
+            if (place_region(&PLACE[i], aabb)) {
+                goxel.image->active_layer = s_demo_base;
+                select_box(aabb);
+                begin_new_shape(PLACE[i].kind);
+                if (s.mod_layer) {
+                    s.mod_layer->slope->dir = PLACE[i].dir;
+                    s.mod_layer->slope->anchor = PLACE[i].anchor;
+                    s.mod_layer->slope->closed = PLACE[i].closed;
+                    s.mod_layer->slope->rise = PLACE[i].rise;
+                    s.mod_layer->slope->revision++;
+                }
+                s_demo_layer = s.mod_layer;
+                s_place_next = i + 1;
+                memcpy(s_place_aabb[i], aabb, sizeof(aabb));
+                printf("place %d: %s %s %s rise %.1f -- %s\n"
+                       "         region [%d %d %d]..[%d %d %d]\n",
+                       i, slope_kind_name(PLACE[i].kind),
+                       PLACE[i].anchor == SLOPE_ANCHOR_CEIL ? "ceil" :
+                       PLACE[i].anchor == SLOPE_ANCHOR_MID ? "mid" : "floor",
+                       PLACE[i].closed ? "full" : "open", PLACE[i].rise,
+                       PLACE[i].label,
+                       aabb[0][0], aabb[0][1], aabb[0][2],
+                       aabb[1][0], aabb[1][1], aabb[1][2]);
+            }
+        } else if (f == begin + 40 && s.mode) {
+            // Commit it, report where it landed, and get the editor out of the
+            // way so the photograph is of the result, not of the strip.
+            layer_t *applied = s.mod_layer;
+            apply_session();
+            if (applied) print_shape_bounds(applied->slope);
+            s_demo_layer = NULL;
+            s_place_last = applied;
+            goxel.image->active_layer = s_demo_base;
+            if (goxel.image->selection_mask)
+                volume_clear(goxel.image->selection_mask);
+        } else if (f == begin + 45) {
+            // Frame just this shape, alone, from the angle that shows it best.
+            int j, near_aabb[2][3];
+            float near_box[4][4];
+            show_only(s_place_last);
+            for (j = 0; j < 3; j++) {
+                near_aabb[0][j] = s_place_aabb[i][0][j] - 16;
+                near_aabb[1][j] = s_place_aabb[i][1][j] + 16;
+            }
+            bbox_from_aabb(near_box, near_aabb);
+            set_view_box(cam, near_box, PLACE[i].rz, PLACE[i].rx);
+        }
+    }
+
+    if (f == 40 + nb * 90) {
+        const char *dir = getenv("GOXEL_SHOTS");
+        char path[512];
+        layer_t *l;
+        int i2 = 0;
+        goxel.image->active_layer = s_demo_base;
+        show_all();
+        set_view(cam, -.9f, 1.15f);
+        if (dir && *dir) {
+            snprintf(path, sizeof(path), "%s/placement.gox", dir);
+            printf("placement: save %s -> %d\n", path,
+                   goxel_export_to_file(path, "gox"));
+        }
+        DL_FOREACH(goxel.image->layers, l) {
+            printf("layer %d: name='%s' cells=%d shape=%s rise=%.2f\n", i2++,
+                   l->name, count_vol_cells(l->volume),
+                   l->slope ? slope_kind_name(l->slope->kind) : "-",
+                   l->slope ? l->slope->rise : 0.f);
+        }
+        fflush(stdout);
+    }
+    if (f == 40 + nb * 90 + 40) goxel.quit = true;
+}
+
 static void slope_demo_step(void)
 {
     int aabb[2][3];
@@ -1137,6 +1522,10 @@ static void slope_demo_step(void)
     camera_t *cam = goxel.image->active_camera;
 
     if (!s_demo) return;
+    if (s_place_demo) {
+        place_step();
+        return;
+    }
     if (s_shape_demo) {
         shapes_step();
         return;
@@ -1236,11 +1625,13 @@ void slope_capture(void)
 {
     static const int AT[] = {60, 200, 340};
     static const int AT_SHAPES[] = {80, 170, 260, 350};
+    static const int AT_PLACE[] = {105, 195, 285, 375, 465, 510};
     static const char *dir = NULL;
     static int idx = 0;
     static const char *once = NULL;
-    const int *at = s_shape_demo ? AT_SHAPES : AT;
-    int nb = s_shape_demo ? (int)(sizeof(AT_SHAPES) / sizeof(AT_SHAPES[0]))
+    const int *at = s_place_demo ? AT_PLACE : s_shape_demo ? AT_SHAPES : AT;
+    int nb = s_place_demo ? (int)(sizeof(AT_PLACE) / sizeof(AT_PLACE[0]))
+           : s_shape_demo ? (int)(sizeof(AT_SHAPES) / sizeof(AT_SHAPES[0]))
                           : (int)(sizeof(AT) / sizeof(AT[0]));
     char path[512];
 
@@ -1256,7 +1647,9 @@ void slope_capture(void)
     if (!*dir || idx >= nb) return;
     if (goxel.frame_count < at[idx]) return;
 
-    if (s_shape_demo)
+    if (s_place_demo)
+        snprintf(path, sizeof(path), "%s/place%d.png", dir, idx);
+    else if (s_shape_demo)
         snprintf(path, sizeof(path), "%s/shape%d.png", dir, idx);
     else
         snprintf(path, sizeof(path), "%s/frame%03d.png", dir, at[idx]);
@@ -1266,8 +1659,9 @@ void slope_capture(void)
     }
     idx++;
     // Once every requested frame is on disk there is nothing left to show.
-    // The shapes demo keeps running so it can write its document out first.
-    if (idx >= nb && !s_shape_demo) goxel.quit = true;
+    // The shapes and placement demos keep running so they can write their
+    // document out first.
+    if (idx >= nb && !s_shape_demo && !s_place_demo) goxel.quit = true;
 }
 
 // #### Headless self test ###############################################
@@ -1486,50 +1880,106 @@ static uint32_t layer_cells_hash(const layer_t *layer)
     return key;
 }
 
-// Every kind has to produce a real closed surface: no NaN, nothing underneath
-// the region it was made from, and the crown exactly where the parameter says.
+// Every kind, on every anchor plane, open and closed, has to produce a real
+// closed surface: no NaN, inside its region footprint, reaching exactly the
+// requested height from its anchor plane and not crossing that plane the wrong
+// way.  This is what proves the shapes are not stuck growing upwards.
 static void check_shape_geometry(void)
 {
     char buf[96];
-    int kind;
+    int kind, anchor, closed;
 
     for (kind = 0; kind < SLOPE_KIND_COUNT; kind++) {
-        slope_mod_t m = {};
-        model3d_t *mo;
-        float zmin = 1e9f, zmax = -1e9f;
-        bool finite = true;
-        int v;
+        for (anchor = 0; anchor < SLOPE_ANCHOR_COUNT; anchor++) {
+            for (closed = 0; closed <= 1; closed++) {
+                slope_mod_t m = {};
+                model3d_t *mo;
+                float zmin = 1e9f, zmax = -1e9f;
+                float xmin = 1e9f, xmax = -1e9f, ymin = 1e9f, ymax = -1e9f;
+                surf_frame_t fr;
+                bool finite = true;
+                int v;
 
-        m.kind = kind;
-        m.dir = SLOPE_DIR_PX;
-        m.rise = 10.f;
-        m.aabb[0][0] = 0;   m.aabb[1][0] = 12;
-        m.aabb[0][1] = 0;   m.aabb[1][1] = 20;
-        m.aabb[0][2] = -5;  m.aabb[1][2] = 3;
+                m.kind = kind;
+                m.dir = SLOPE_DIR_PX;
+                m.anchor = anchor;
+                m.closed = closed;
+                m.rise = 10.f;
+                m.aabb[0][0] = 0;   m.aabb[1][0] = 12;
+                m.aabb[0][1] = 0;   m.aabb[1][1] = 20;
+                m.aabb[0][2] = -5;  m.aabb[1][2] = 3;
+                surf_frame(&m, &fr);
 
-        mo = build_mesh(&m);
-        for (v = 0; v < mo->nb_vertices; v++) {
-            const float *p = mo->vertices[v].pos;
-            if (!isfinite(p[0]) || !isfinite(p[1]) || !isfinite(p[2]))
-                finite = false;
-            zmin = min(zmin, p[SLOPE_UP]);
-            zmax = max(zmax, p[SLOPE_UP]);
+                mo = build_mesh(&m);
+                for (v = 0; v < mo->nb_vertices; v++) {
+                    const float *p = mo->vertices[v].pos;
+                    if (!isfinite(p[0]) || !isfinite(p[1]) || !isfinite(p[2]))
+                        finite = false;
+                    zmin = min(zmin, p[SLOPE_UP]);
+                    zmax = max(zmax, p[SLOPE_UP]);
+                    xmin = min(xmin, p[0]); xmax = max(xmax, p[0]);
+                    ymin = min(ymin, p[1]); ymax = max(ymax, p[1]);
+                }
+                snprintf(buf, sizeof(buf), "%s/%s/%s: %d vertices",
+                         slope_kind_name(kind),
+                         anchor == SLOPE_ANCHOR_CEIL ? "ceil" :
+                         anchor == SLOPE_ANCHOR_MID ? "mid" : "floor",
+                         closed ? "full" : "open", mo->nb_vertices);
+                check("shape builds a real surface",
+                      mo->nb_vertices > 0 && finite, buf);
+
+                snprintf(buf, sizeof(buf), "%s/%s", slope_kind_name(kind),
+                         closed ? "full" : "open");
+                check("shape stays inside its region footprint",
+                      xmin >= m.aabb[0][0] - SLOPE_EPS - 1e-3f &&
+                      xmax <= m.aabb[1][0] + 1.f + SLOPE_EPS + 1e-3f &&
+                      ymin >= m.aabb[0][1] - SLOPE_EPS - 1e-3f &&
+                      ymax <= m.aabb[1][1] + 1.f + SLOPE_EPS + 1e-3f, buf);
+
+                if (fr.spans) {
+                    // A full barrel or ellipsoid is centred on its anchor.
+                    snprintf(buf, sizeof(buf), "%s: z %.2f..%.2f want %.2f..%.2f",
+                             slope_kind_name(kind), zmin, zmax,
+                             fr.centre - fr.rise, fr.centre + fr.rise);
+                    check("closed shape spans centre by rise",
+                          fabsf(zmax - (fr.centre + fr.rise)) < 0.01f &&
+                          fabsf(zmin - (fr.centre - fr.rise)) < 0.01f, buf);
+                } else {
+                    snprintf(buf, sizeof(buf), "%s: crown %.2f want %.2f",
+                             slope_kind_name(kind),
+                             fr.dirz > 0 ? zmax : zmin, surf_crown(&fr));
+                    check("shape crown sits at the requested height",
+                          fabsf((fr.dirz > 0 ? zmax : zmin) - surf_crown(&fr))
+                              < 0.01f, buf);
+                    snprintf(buf, sizeof(buf), "%s: z %.2f..%.2f anchor %.2f",
+                             slope_kind_name(kind), zmin, zmax, fr.base);
+                    check("shape does not cross its anchor plane",
+                          fr.dirz > 0 ? zmin >= fr.base - SLOPE_EPS - 1e-3f
+                                      : zmax <= fr.base + SLOPE_EPS + 1e-3f, buf);
+                }
+
+                if (kind == SLOPE_KIND_BEVEL) {
+                    // A directed bevel chamfers only the high edge; a closed
+                    // one chamfers the face right round, so the chamfered face
+                    // starts further in along the run.
+                    float face_rmin = 1e9f;
+                    for (v = 0; v < mo->nb_vertices; v++) {
+                        const float *p = mo->vertices[v].pos;
+                        if (fabsf(p[SLOPE_UP] - surf_crown(&fr)) < 0.01f)
+                            face_rmin = min(face_rmin, p[0]);
+                    }
+                    snprintf(buf, sizeof(buf), "%s %s: face starts at %.2f",
+                             slope_kind_name(kind), closed ? "full" : "open",
+                             face_rmin);
+                    check("bevel chamfers the edges its kind asks for",
+                          closed ? face_rmin > m.aabb[0][0] + 0.5f
+                                 : fabsf(face_rmin - m.aabb[0][0]) < 0.01f, buf);
+                }
+
+                free_mesh(mo);
+                check("the heap is intact after the shape", heap_ok(), buf);
+            }
         }
-        snprintf(buf, sizeof(buf), "%s: %d vertices",
-                 slope_kind_name(kind), mo->nb_vertices);
-        check("shape builds a real surface", mo->nb_vertices > 0 && finite, buf);
-        snprintf(buf, sizeof(buf), "%s: zmin %.3f floor %.3f",
-                 slope_kind_name(kind), zmin, (float)m.aabb[0][2]);
-        check("shape never dips under its region",
-              zmin >= (float)m.aabb[0][2] - SLOPE_EPS - 1e-3f, buf);
-        snprintf(buf, sizeof(buf), "%s: zmax %.3f want %.3f",
-                 slope_kind_name(kind), zmax, (float)m.aabb[0][2] + m.rise);
-        check("shape crown sits at the requested height",
-              fabsf(zmax - ((float)m.aabb[0][2] + m.rise)) < 0.01f, buf);
-        free(mo->vertices);
-        free(mo);
-        check("the heap is intact after the shape", heap_ok(),
-              slope_kind_name(kind));
     }
 }
 
@@ -1779,6 +2229,169 @@ void slope_selftest(void)
                 }
             }
         }
+
+        // #### ordinary voxel edits inside a shape's own region ####
+        // The surface is generated from the region box, so a voxel painted
+        // inside it cannot move the surface; that has to be reported, and it
+        // must not leave a ghost shell behind.
+        {
+            layer_t *sh = NULL, *l;
+            int p[3], tries = 0;
+            bool base_ok = false, after_add, after_recolour, after_undo;
+            uint32_t mesh_before;
+
+            DL_FOREACH(img->layers, l) {
+                if (l->slope && l->slope->kind == SLOPE_KIND_SLOPE) sh = l;
+            }
+            if (!sh) {
+                check("a shape layer is available for in-region edits", false, NULL);
+            } else {
+                // Find a cell inside the region that this layer does not hold.
+                volume_iterator_t iter;
+                uint8_t c[4];
+                int q[3], found = 0;
+                int reg[2][3];
+                memcpy(reg, sh->slope->aabb, sizeof(reg));
+                for (p[2] = reg[0][2]; p[2] <= reg[1][2] && !found; p[2]++)
+                for (p[1] = reg[0][1]; p[1] <= reg[1][1] && !found; p[1]++)
+                for (p[0] = reg[0][0]; p[0] <= reg[1][0] && !found; p[0]++) {
+                    volume_get_at(sh->volume, NULL, p, c);
+                    if (c[3] == 0) found = 1;
+                }
+                (void) iter; (void) q; (void) tries;
+                if (!found) {
+                    check("an empty cell inside the region was found", false, NULL);
+                } else {
+                    base_ok = !slope_conflict(sh);
+                    ensure_mesh(sh);
+                    mesh_before = sh->slope->mesh_hash;
+
+                    vec4_set(c, 20, 200, 60, 255);
+                    volume_set_at(sh->volume, NULL, p, c);
+                    after_add = slope_conflict(sh);
+                    check("adding a cell inside the region is reported",
+                          base_ok && after_add, NULL);
+
+                    ensure_mesh(sh);
+                    snprintf(buf, sizeof(buf), "mesh %u -> %u",
+                             mesh_before, sh->slope->mesh_hash);
+                    check("the surface does not ghost to the new cell",
+                          sh->slope->mesh_hash == mesh_before, buf);
+
+                    vec4_set(c, 200, 20, 60, 255);
+                    volume_set_at(sh->volume, NULL, p, c);
+                    after_recolour = slope_conflict(sh);
+                    check("recolouring inside the region stays reported",
+                          after_recolour, NULL);
+
+                    vec4_set(c, 0, 0, 0, 0);
+                    volume_set_at(sh->volume, NULL, p, c);
+                    after_undo = !slope_conflict(sh);
+                    check("removing the added cell clears the report", after_undo, NULL);
+                }
+            }
+        }
+
+        // #### rendered face traces back to the source cells ####
+        // The generated surface has to sit exactly on the region the cells
+        // occupy: that is what makes a rendered face traceable to a cell.
+        {
+            layer_t *l;
+            int done = 0;
+            DL_FOREACH(img->layers, l) {
+                surf_frame_t fr;
+                model3d_t *mo;
+                float xmin, xmax, ymin, ymax;
+                int v;
+                if (!l->slope || done >= 2) continue;
+                surf_frame(l->slope, &fr);
+                mo = build_mesh(l->slope);
+                xmin = ymin = 1e9f; xmax = ymax = -1e9f;
+                for (v = 0; v < mo->nb_vertices; v++) {
+                    const float *q = mo->vertices[v].pos;
+                    xmin = min(xmin, q[0]); xmax = max(xmax, q[0]);
+                    ymin = min(ymin, q[1]); ymax = max(ymax, q[1]);
+                }
+                snprintf(buf, sizeof(buf), "%s: x %.2f..%.2f y %.2f..%.2f",
+                         l->name, xmin, xmax, ymin, ymax);
+                check("the surface footprint matches its source region",
+                      fabsf(xmin - (l->slope->aabb[0][0] - SLOPE_EPS)) < 0.01f &&
+                      fabsf(xmax - (l->slope->aabb[1][0] + 1.f + SLOPE_EPS)) < 0.01f &&
+                      fabsf(ymin - (l->slope->aabb[0][1] - SLOPE_EPS)) < 0.01f &&
+                      fabsf(ymax - (l->slope->aabb[1][1] + 1.f + SLOPE_EPS)) < 0.01f,
+                      buf);
+                free_mesh(mo);
+                done++;
+            }
+        }
+    }
+
+    // #### stress (GOXEL_STRESS=<cycles>) ####
+    // The heaviest configurations this module can make, rebuilt over and over
+    // with the undo stack churning underneath.  A leak shows up as a live mesh
+    // count that never comes back down; heap damage as _heapchk failing.
+    {
+        const char *env = getenv("GOXEL_STRESS");
+        const int cycles = env ? atoi(env) : 0;
+        if (cycles > 0) {
+            const long live0 = s_mesh_live;
+            const int cells0 = count_cells(goxel.image);
+            int c, worst = 0, built = 0;
+            bool heap_good = true;
+
+            // Phase A: build and release the heaviest meshes.  Nothing else
+            // touches the heap here, so the live count has to come back to 0.
+            for (c = 0; c < cycles && heap_good; c++) {
+                int kind, anchor, closed;
+                for (kind = 0; kind < SLOPE_KIND_COUNT; kind++)
+                for (anchor = 0; anchor < SLOPE_ANCHOR_COUNT; anchor++)
+                for (closed = 0; closed <= 1; closed++) {
+                    slope_mod_t m = {};
+                    model3d_t *mo;
+                    m.kind = kind;
+                    m.dir = (c + kind) % SLOPE_DIR_COUNT;
+                    m.anchor = anchor;
+                    m.closed = closed;
+                    m.rise = 3.f + (c % 11);
+                    m.aabb[0][0] = -30;  m.aabb[1][0] = 30;
+                    m.aabb[0][1] = -20;  m.aabb[1][1] = 20;
+                    m.aabb[0][2] = -12;  m.aabb[1][2] = 12;
+                    mo = build_mesh(&m);
+                    if (mo->nb_vertices > worst) worst = mo->nb_vertices;
+                    built++;
+                    free_mesh(mo);
+                }
+                if (!heap_ok()) heap_good = false;
+            }
+            snprintf(buf, sizeof(buf), "%d cycles, %d meshes, peak %d verts",
+                     cycles, built, worst);
+            check("stress keeps the heap intact", heap_good, buf);
+            snprintf(buf, sizeof(buf), "live %+ld of %ld made",
+                     s_mesh_live - live0, s_mesh_made);
+            check("stress leaks no generated mesh", s_mesh_live == live0, buf);
+
+            // Phase B: churn the undo stack under the real document.  Ends on a
+            // redo so the document is left where it was found, which is what
+            // makes the cell-count comparison mean something.
+            heap_good = true;
+            for (c = 0; c < cycles && heap_good; c++) {
+                layer_t *l;
+                DL_FOREACH(goxel.image->layers, l) {
+                    if (!l->slope) continue;
+                    l->slope->rise += 0.5f;
+                    l->slope->revision++;
+                }
+                image_history_push(goxel.image);
+                image_undo(goxel.image);
+                image_redo(goxel.image);
+                if (!heap_ok()) heap_good = false;
+            }
+            check("stress keeps the heap intact through undo", heap_good, buf);
+            snprintf(buf, sizeof(buf), "%d of %d cells",
+                     count_cells(goxel.image), cells0);
+            check("stress keeps the cell count",
+                  count_cells(goxel.image) == cells0, buf);
+        }
     }
 
     // #### save / reopen ####
@@ -1787,12 +2400,24 @@ void slope_selftest(void)
     {
         const char *save_path = getenv("GOXEL_SELFTEST_SAVE");
         if (save_path && *save_path) {
-            typedef struct { int aabb[6]; int kind; int dir; float rise; } snap_t;
+            typedef struct {
+                int aabb[6]; int kind; int dir; int anchor; int closed; float rise;
+            } snap_t;
             snap_t pre[8];
-            int pre_n = 0, matched = 0, ok = 1;
+            int pre_n = 0, matched = 0, ok = 1, ok_place = 1;
             int pre_cells = count_cells(goxel.image);
             layer_t *l;
             int k;
+
+            // Give one modifier a non-default placement, so the round trip has
+            // to carry the anchor plane and the open/closed shape as well.
+            DL_FOREACH(goxel.image->layers, l) {
+                if (l->slope && l->slope->kind == SLOPE_KIND_SPHERE) {
+                    l->slope->anchor = SLOPE_ANCHOR_MID;
+                    l->slope->closed = 1;
+                    l->slope->revision++;
+                }
+            }
 
             DL_FOREACH(goxel.image->layers, l) {
                 if (!l->slope || pre_n >= 8) continue;
@@ -1802,6 +2427,8 @@ void slope_selftest(void)
                 }
                 pre[pre_n].kind = l->slope->kind;
                 pre[pre_n].dir = l->slope->dir;
+                pre[pre_n].anchor = l->slope->anchor;
+                pre[pre_n].closed = l->slope->closed;
                 pre[pre_n].rise = l->slope->rise;
                 pre_n++;
             }
@@ -1827,12 +2454,17 @@ void slope_selftest(void)
                         ok = false;
                         break;
                     }
+                    if (l->slope->anchor != pre[matched].anchor ||
+                            l->slope->closed != pre[matched].closed)
+                        ok_place = false;
                     matched++;
                 }
                 snprintf(buf, sizeof(buf), "%d of %d modifiers",
                          matched, pre_n);
                 check("reopen keeps every modifier editable",
                       ok && matched == pre_n && pre_n > 1, buf);
+                check("reopen keeps the anchor plane and open/closed shape",
+                      ok_place && matched == pre_n, buf);
             }
         }
     }

@@ -2,7 +2,7 @@
 # AMFM #534: capture the four shape kinds, then reopen the saved document.
 export PATH=/ucrt64/bin:/usr/bin:$PATH
 cd /c/projects_tools/goxel-lab/goxel
-scons -j 20 mode=release werror=false 2>&1 | grep -E 'error|scons: \*\*\*' | head -20
+scons -j 20 mode=release werror=false 2>&1 | grep -E 'error:|scons: \*\*\*' | head -20
 cd /c/projects_tools/goxel-lab
 rm -f evidence/shapes/shape*.png evidence/shapes/shapes.gox
 

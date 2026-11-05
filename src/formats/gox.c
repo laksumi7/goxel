@@ -388,7 +388,7 @@ void save_to_file(const image_t *img, const char *path)
         // AMFM #534: the surface modifier travels with its layer.  Older
         // builds simply ignore these keys.
         if (layer->slope) {
-            int32_t sp[8];
+            int32_t sp[10];
             int k;
             for (k = 0; k < 3; k++) {
                 sp[k] = layer->slope->aabb[0][k];
@@ -396,6 +396,8 @@ void save_to_file(const image_t *img, const char *path)
             }
             sp[6] = layer->slope->dir;
             sp[7] = layer->slope->kind;
+            sp[8] = layer->slope->anchor;
+            sp[9] = layer->slope->closed;
             chunk_write_dict_value(&c, out, "slope", sp, sizeof(sp));
             chunk_write_dict_value(&c, out, "slope-rise", &layer->slope->rise,
                                    sizeof(layer->slope->rise));
@@ -642,10 +644,12 @@ int load_from_file(const char *path, bool replace)
                     layer->material = get_material(goxel.image, material_idx);
 
                 // AMFM #534: restore the surface modifier of this layer.
-                // Version 7 carried a planar slope only; version 8 adds the kind.
+                // 7 ints = a planar slope only, 8 adds the kind, 10 adds the
+                // anchor plane and the open/closed shape.
                 if (strcmp(dict_key, "slope") == 0 &&
                         (dict_value_size == 7 * sizeof(int32_t) ||
-                         dict_value_size == 8 * sizeof(int32_t))) {
+                         dict_value_size == 8 * sizeof(int32_t) ||
+                         dict_value_size == 10 * sizeof(int32_t))) {
                     const int32_t *sp = (const int32_t *)dict_value;
                     int k;
                     if (!layer->slope) layer->slope = slope_new();
@@ -655,9 +659,15 @@ int load_from_file(const char *path, bool replace)
                     }
                     layer->slope->dir = sp[6];
                     layer->slope->kind = SLOPE_KIND_SLOPE;
-                    if (dict_value_size == 8 * sizeof(int32_t) &&
+                    if (dict_value_size >= 8 * sizeof(int32_t) &&
                             sp[7] >= SLOPE_KIND_SLOPE && sp[7] < SLOPE_KIND_COUNT)
                         layer->slope->kind = sp[7];
+                    if (dict_value_size == 10 * sizeof(int32_t)) {
+                        if (sp[8] >= SLOPE_ANCHOR_FLOOR &&
+                                sp[8] < SLOPE_ANCHOR_COUNT)
+                            layer->slope->anchor = sp[8];
+                        layer->slope->closed = sp[9] ? 1 : 0;
+                    }
                 }
                 if (strcmp(dict_key, "slope-rise") == 0 &&
                         dict_value_size == sizeof(float)) {

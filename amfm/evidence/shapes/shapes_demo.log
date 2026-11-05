@@ -15,8 +15,8 @@ shape 2 (Cylinder): region [-39 -34 -25]..[-15 34 18] rise 28.00
 slope: wrote C:/projects_tools/goxel-lab/evidence/shapes/shape2.png
 shape 3 (Sphere): region [14 -34 -25]..[39 34 18] rise 43.00
 slope: wrote C:/projects_tools/goxel-lab/evidence/shapes/shape3.png
-2.407: Save to C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox save_to_file (src/formats/gox.c:259)
-2.464: Saved C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox sys_on_saved (src/system.c:312)
+2.266: Save to C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox save_to_file (src/formats/gox.c:259)
+2.324: Saved C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox sys_on_saved (src/system.c:312)
 shapes: save C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox -> 0
 layer 0: name='Layer.1' cells=36111 shape=- rise=0.00
 layer 1: name='Slope 1' cells=15800 shape=Slope rise=20.00
