@@ -601,6 +601,8 @@ int main(int argc, char **argv)
         slope_demo_begin_pd();
     if (getenv("GOXEL_PD_EXTRACT"))
         slope_demo_begin_extract();
+    if (getenv("GOXEL_MOVE_TEST"))
+        slope_demo_begin_move_test();
 
     if (args.script) {
         script_run_from_file(args.script, args.script_args_nb, args.script_args);

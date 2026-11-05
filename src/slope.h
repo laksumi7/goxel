@@ -117,6 +117,30 @@ bool slope_session_is_open(void);
 // Used by the live bridge's `shape` verb.  Returns 0 or a negative refusal code.
 int slope_apply_shape_at(const int cell[3], const char *name, float rise);
 
+/*
+ * AMFM #534 P0: a generated surface has to travel with the cells it was made
+ * from.  The surface is built inside `aabb`, in world cells, so any transform
+ * that moves the cells must move the region too or the surface is left behind.
+ */
+
+// Transform an inclusive cell region by a matrix made of translations, 90
+// degree rotations and axis flips, and normalise it back to a cell box.
+void slope_transform_aabb(const int src[2][3], const float mat[4][4], int out[2][3]);
+
+// Move the surface of `layer` along with a transform already applied to its
+// voxels.  Also turns `dir` when the matrix rotates or flips the shape's axis.
+// Returns 0, or 1 when the axis could not be represented after the transform.
+int slope_move_surface(layer_t *layer, const float mat[4][4]);
+
+// True when the layer's shape region holds cells but the mask does not cover
+// all of them — a partial grab that must be flagged rather than silently
+// leaving part of the surface behind.
+bool slope_region_partly_in(const layer_t *layer, const volume_t *mask);
+
+// AMFM #534 P0 proof: select a region, move it through the same calls the Move
+// tool makes, and dump before/after/undo.  Driven by GOXEL_MOVE_TEST.
+void slope_demo_begin_move_test(void);
+
 // Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set, or a
 // single frame to the file named by GOXEL_SHOTS_ONCE.
 void slope_capture(void);

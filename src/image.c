@@ -716,6 +716,131 @@ bool image_layer_can_edit(const image_t *img, const layer_t *layer)
     return !layer->base_id && !layer->image && !layer->shape;
 }
 
+/* #### One-object selection move (AMFM #534 P0) ############################ */
+
+// volume_is_empty() only says whether a volume has any tiles allocated; a
+// volume whose voxels were all merged away still has its tiles, so it is not
+// enough to decide whether a layer was really touched.  This asks for voxels.
+static bool volume_has_cells(const volume_t *vol)
+{
+    int bbox[2][3];
+    return volume_get_bbox(vol, bbox, true);
+}
+
+struct image_move_item {
+    layer_t  *layer;
+    volume_t *keep;       // the layer without the selected cells
+    volume_t *sel;        // the selected cells
+    int       aabb[2][3]; // the surface region at begin, if the layer has one
+    bool      has_slope;
+    bool      partial;
+};
+
+struct image_move {
+    int n;
+    struct image_move_item *it;
+    bool partial;
+};
+
+image_move_t *image_move_begin(image_t *img, const volume_t *mask)
+{
+    image_move_t *mv;
+    layer_t *l;
+    int n = 0, i = 0;
+
+    if (!img || !mask || !volume_has_cells(mask)) return NULL;
+
+    DL_FOREACH(img->layers, l) {
+        volume_t *sel = volume_copy(l->volume);
+        volume_merge(sel, mask, MODE_INTERSECT, NULL);
+        if (volume_has_cells(sel)) n++;
+        volume_delete(sel);
+    }
+    if (!n) return NULL;
+
+    mv = calloc(1, sizeof(*mv));
+    mv->it = calloc(n, sizeof(*mv->it));
+    DL_FOREACH(img->layers, l) {
+        volume_t *sel = volume_copy(l->volume);
+        volume_merge(sel, mask, MODE_INTERSECT, NULL);
+        if (!volume_has_cells(sel)) { volume_delete(sel); continue; }
+        mv->it[i].layer = l;
+        if (l->slope) {
+            // A generated surface is one object.  If the selection reached any
+            // of its cells, take every cell it owns, not just the ones the box
+            // happened to cover — otherwise the region moves and its cells do
+            // not, which is the same defect in miniature.
+            volume_t *reg = volume_new();
+            volume_t *shape;
+            int p[3];
+            const uint8_t on[4] = { 255, 255, 255, 255 };
+            for (p[2] = l->slope->aabb[0][2]; p[2] <= l->slope->aabb[1][2]; p[2]++)
+                for (p[1] = l->slope->aabb[0][1]; p[1] <= l->slope->aabb[1][1]; p[1]++)
+                    for (p[0] = l->slope->aabb[0][0]; p[0] <= l->slope->aabb[1][0]; p[0]++)
+                        volume_set_at(reg, NULL, p, on);
+            shape = volume_copy(l->volume);
+            volume_merge(shape, reg, MODE_INTERSECT, NULL);
+            if (volume_has_cells(shape)) {
+                volume_merge(sel, shape, MODE_OVER, NULL);
+                mv->it[i].partial = slope_region_partly_in(l, mask);
+                if (mv->it[i].partial) mv->partial = true;
+            }
+            volume_delete(shape);
+            volume_delete(reg);
+            mv->it[i].has_slope = true;
+            memcpy(mv->it[i].aabb, l->slope->aabb, sizeof(mv->it[i].aabb));
+        }
+        mv->it[i].sel = sel;
+        mv->it[i].keep = volume_copy(l->volume);
+        volume_merge(mv->it[i].keep, sel, MODE_SUB, NULL);
+        i++;
+    }
+    mv->n = i;
+    return mv;
+}
+
+void image_move_apply(image_move_t *mv, const float mat[4][4])
+{
+    int i;
+    if (!mv || mat4_is_identity(mat)) return;
+    for (i = 0; i < mv->n; i++) {
+        layer_t *l = mv->it[i].layer;
+        volume_t *tmp = volume_copy(mv->it[i].sel);
+        volume_move(tmp, mat);
+        volume_set(l->volume, mv->it[i].keep);
+        volume_merge(l->volume, tmp, MODE_OVER, NULL);
+        volume_delete(tmp);
+        if (mv->it[i].has_slope) {
+            // Start from the snapshot each frame, so repeated applies during a
+            // drag cannot accumulate.
+            memcpy(l->slope->aabb, mv->it[i].aabb, sizeof(l->slope->aabb));
+            slope_move_surface(l, mat);
+        }
+    }
+}
+
+void image_move_end(image_move_t *mv)
+{
+    int i;
+    if (!mv) return;
+    for (i = 0; i < mv->n; i++) {
+        volume_delete(mv->it[i].keep);
+        volume_delete(mv->it[i].sel);
+    }
+    free(mv->it);
+    free(mv);
+}
+
+bool image_move_partial(const image_move_t *mv)
+{
+    return mv ? mv->partial : false;
+}
+
+int image_move_layer_count(const image_move_t *mv)
+{
+    return mv ? mv->n : 0;
+}
+
 /*
  * Function: image_get_key
  * Return a value that is garantied to change when the image change.

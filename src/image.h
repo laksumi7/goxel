@@ -77,6 +77,29 @@ void image_history_resize(image_t *img, int size);
 
 bool image_layer_can_edit(const image_t *img, const layer_t *layer);
 
+/*
+ * AMFM #534 P0: a selection-driven move that treats everything inside the
+ * selection as one authoring object.
+ *
+ * Goxel's Move tool used to translate the active layer only, so an assembly
+ * that spans several layers — a PD turret whose body is on the ship layer and
+ * whose smooth barrels are their own generated-surface layers — came apart: the
+ * body moved and the generated surfaces stayed behind.  These calls snapshot
+ * every layer holding cells in the mask, and each apply translates all of them
+ * by the same transform, including the region a generated surface is built in.
+ *
+ * begin/apply/end mirrors how the tool drags: snapshot once at BEGIN, re-apply
+ * from the snapshot on every frame, release at END (one history entry).
+ */
+typedef struct image_move image_move_t;
+image_move_t *image_move_begin(image_t *img, const volume_t *mask);
+void          image_move_apply(image_move_t *mv, const float mat[4][4]);
+void          image_move_end(image_move_t *mv);
+// True if a generated surface was only partly inside the selection.
+bool          image_move_partial(const image_move_t *mv);
+// How many layers the grab took hold of.
+int           image_move_layer_count(const image_move_t *mv);
+
 material_t *image_add_material(image_t *img, material_t *mat);
 void image_delete_material(image_t *img, material_t *mat);
 

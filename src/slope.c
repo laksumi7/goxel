@@ -1341,6 +1341,7 @@ static bool s_place_demo = false;
 static bool s_edit_demo = false;
 static bool s_pd_demo = false;
 static bool s_extract = false;
+static bool s_move_test = false;
 static int s_edit_reg[2][3];
 static int s_place_next = 0;
 static layer_t *s_place_last = NULL;
@@ -1416,8 +1417,15 @@ void slope_dump_cells(const char *path)
                 n++;
             }
         }
-        fprintf(f, "# layer[%d] '%s' cells=%d shape=%d\n", i, l->name, n,
+        fprintf(f, "# layer[%d] '%s' cells=%d shape=%d", i, l->name, n,
                 l->slope ? 1 : 0);
+        if (l->slope)
+            fprintf(f, " aabb=%d,%d,%d..%d,%d,%d rev=%u stale=%d kind=%s",
+                    l->slope->aabb[0][0], l->slope->aabb[0][1], l->slope->aabb[0][2],
+                    l->slope->aabb[1][0], l->slope->aabb[1][1], l->slope->aabb[1][2],
+                    l->slope->revision, l->slope->stale,
+                    slope_kind_name(l->slope->kind));
+        fprintf(f, "\n");
         i++;
     }
     // Distinct RGBA values in use, so a script can reuse the exact colours of
@@ -1532,6 +1540,100 @@ int slope_apply_shape_at(const int cell[3], const char *name, float rise)
     if (goxel.image->selection_mask)
         volume_clear(goxel.image->selection_mask);
     return 0;
+}
+
+/* #### Group transforms (AMFM #534 P0) #####################################
+ *
+ * A generated surface is built inside `slope->aabb`, in world cells.  So any
+ * transform that moves the cells has to move that region as well, otherwise the
+ * body travels and the smooth surface is left floating where it was made.
+ */
+
+void slope_transform_aabb(const int src[2][3], const float mat[4][4], int out[2][3])
+{
+    float mn[3], mx[3];
+    int i, j;
+
+    // Cells are moved by their integer position — that is how volume_move()
+    // moves them, a cell at c lands wherever c lands — so the region has to be
+    // transformed the same way or the surface drifts a cell from its voxels
+    // under a rotation.
+    for (j = 0; j < 3; j++) {
+        mn[j] = 1e9f;
+        mx[j] = -1e9f;
+    }
+    for (i = 0; i < 8; i++) {
+        float p[3], q[3];
+        for (j = 0; j < 3; j++) p[j] = (i & (1 << j)) ? src[1][j] : src[0][j];
+        mat4_mul_vec3(mat, p, q);
+        for (j = 0; j < 3; j++) {
+            mn[j] = fmin(mn[j], lroundf(q[j]));
+            mx[j] = fmax(mx[j], lroundf(q[j]));
+        }
+    }
+    for (j = 0; j < 3; j++) {
+        out[0][j] = (int)mn[j];
+        out[1][j] = (int)mx[j];
+    }
+}
+
+int slope_move_surface(layer_t *layer, const float mat[4][4])
+{
+    slope_mod_t *m;
+    int nb[2][3];
+    int odd = 0;
+
+    if (!layer || !layer->slope) return 0;
+    m = layer->slope;
+
+    slope_transform_aabb(m->aabb, mat, nb);
+    if (memcmp(nb, m->aabb, sizeof(nb))) {
+        memcpy(m->aabb, nb, sizeof(nb));
+        m->revision++;              // forces the mesh to be rebuilt in place
+    }
+
+    // The axis the surface runs along has to turn with the shape.  `dir` can
+    // only point along X or Y, so a transform that stands it up is reported
+    // rather than silently kept.
+    if (m->dir >= 0 && m->dir < SLOPE_DIR_COUNT) {
+        static const float ax[SLOPE_DIR_COUNT][3] = {
+            { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }
+        };
+        float v[3], d[3];
+        int k, best = -1;
+        float best_dot = 0.f;
+        vec3_copy(ax[m->dir], v);
+        mat4_mul_dir3(mat, v, d);
+        for (k = 0; k < SLOPE_DIR_COUNT; k++) {
+            float dot = d[0] * ax[k][0] + d[1] * ax[k][1] + d[2] * ax[k][2];
+            if (fabsf(dot) > fabsf(best_dot)) { best_dot = dot; best = k; }
+        }
+        if (fabsf(fabsf(best_dot) - 1.f) < 0.01f && best >= 0) {
+            if (best_dot < 0) best ^= 1;     // PX<->NX, PY<->NY are adjacent
+            if (best != m->dir) { m->dir = best; m->revision++; }
+        } else {
+            odd = 1;                        // the axis no longer lies in X/Y
+        }
+    }
+    return odd;
+}
+
+bool slope_region_partly_in(const layer_t *layer, const volume_t *mask)
+{
+    const int *lo, *hi;
+    int p[3], tot = 0, inside = 0;
+
+    if (!layer || !layer->slope || !layer->volume || !mask) return false;
+    lo = layer->slope->aabb[0];
+    hi = layer->slope->aabb[1];
+    for (p[2] = lo[2]; p[2] <= hi[2]; p[2]++)
+        for (p[1] = lo[1]; p[1] <= hi[1]; p[1]++)
+            for (p[0] = lo[0]; p[0] <= hi[0]; p[0]++) {
+                if (volume_get_alpha_at(layer->volume, NULL, p) == 0) continue;
+                tot++;
+                if (volume_get_alpha_at(mask, NULL, p) != 0) inside++;
+            }
+    return tot > 0 && inside < tot;
 }
 
 // Put the camera at a known orientation: Goxel's default is a top view, so
@@ -2169,6 +2271,156 @@ static void pd_extract_step(void)
     }
 }
 
+/*
+ * AMFM #534 P0 proof — move an assembly that owns a generated surface.
+ *
+ *   GOXEL_MOVE_TEST="x0,y0,z0,x1,y1,z1,dx,dy,dz"   select the box, move it
+ *   GOXEL_MOVE_TEST_DUMP=<dir>                     write before/after/undo dumps
+ *   GOXEL_MOVE_TEST_SAVE=<file.gox>                save the moved result
+ *   GOXEL_MOVE_TEST_UNDO=1                         then undo it
+ *   GOXEL_MOVE_TEST_ROT=<x|y|z>                    rotate 90 degrees instead
+ *
+ * It drives image_move_begin/apply/end — the same calls the Move tool makes —
+ * so the proof exercises the transform path, not a re-implementation of it.
+ */
+void slope_demo_begin_move_test(void)
+{
+    s_demo = true;
+    s_move_test = true;
+}
+
+static void move_test_step(void)
+{
+    static image_move_t *mv = NULL;
+    static bool done_move = false, done_after = false, done_save = false, done_undo = false;
+    static int aabb[2][3], off[3];
+    int f = goxel.frame_count;
+    const char *spec = getenv("GOXEL_MOVE_TEST") ?: "";
+    const char *dir = getenv("GOXEL_MOVE_TEST_DUMP") ?: "";
+    const char *save = getenv("GOXEL_MOVE_TEST_SAVE");
+    const char *undo = getenv("GOXEL_MOVE_TEST_UNDO");
+    const char *rot = getenv("GOXEL_MOVE_TEST_ROT");
+    char path[512];
+
+    if (f == 25) {
+        const char *grow = getenv("GOXEL_MOVE_TEST_GROW");
+        if (sscanf(spec, "%d,%d,%d,%d,%d,%d,%d,%d,%d", &aabb[0][0], &aabb[0][1],
+                   &aabb[0][2], &aabb[1][0], &aabb[1][1], &aabb[1][2],
+                   &off[0], &off[1], &off[2]) != 9) {
+            printf("move test: bad spec '%s'\n", spec);
+            fflush(stdout);
+            goxel.quit = true;
+            return;
+        }
+        // Optional: make the first shape own two cells, so a selection that
+        // covers only one of them is a genuine partial grab.
+        if (grow && *grow) {
+            int g[3] = { 1, 0, 0 }, p[3];
+            layer_t *l;
+            const uint8_t c[4] = { 37, 37, 37, 255 };
+            sscanf(grow, "%d,%d,%d", &g[0], &g[1], &g[2]);
+            DL_FOREACH(goxel.image->layers, l) {
+                if (!l->slope) continue;
+                p[0] = l->slope->aabb[1][0] + g[0];
+                p[1] = l->slope->aabb[1][1] + g[1];
+                p[2] = l->slope->aabb[1][2] + g[2];
+                volume_set_at(l->volume, NULL, p, c);
+                l->slope->aabb[1][0] = p[0];
+                l->slope->aabb[1][1] = p[1];
+                l->slope->aabb[1][2] = p[2];
+                l->slope->applied_hash = 0;       // re-seeded on the next refresh
+                l->slope->revision++;
+                printf("move test: grew shape '%s' to own a second cell at %d,%d,%d\n",
+                       l->name, p[0], p[1], p[2]);
+                image_history_push(goxel.image);   // so undo has this as its base
+                break;
+            }
+        }
+        if (*dir) {
+            snprintf(path, sizeof(path), "%s/before.txt", dir);
+            slope_dump_cells(path);
+        }
+        printf("move test: region %d,%d,%d..%d,%d,%d offset %d,%d,%d rot=%s\n",
+               aabb[0][0], aabb[0][1], aabb[0][2], aabb[1][0], aabb[1][1],
+               aabb[1][2], off[0], off[1], off[2], rot ? rot : "-");
+        fflush(stdout);
+    } else if (f == 30 && !done_move) {
+        int p[3];
+        const uint8_t sel[4] = { 255, 255, 255, 255 };
+        volume_t *mask = goxel.image->selection_mask;
+        float mat[4][4] = MAT4_IDENTITY;
+
+        if (!mask) mask = goxel.image->selection_mask = volume_new();
+        for (p[2] = aabb[0][2]; p[2] <= aabb[1][2]; p[2]++)
+            for (p[1] = aabb[0][1]; p[1] <= aabb[1][1]; p[1]++)
+                for (p[0] = aabb[0][0]; p[0] <= aabb[1][0]; p[0]++)
+                    volume_set_at(mask, NULL, p, sel);
+
+        mv = image_move_begin(goxel.image, mask);
+        printf("move test: layers grabbed = %d\n", mv ? image_move_layer_count(mv) : 0);
+        if (rot) {
+            float ax = !strcmp(rot, "x") ? 1.f : 0.f;
+            float ay = !strcmp(rot, "y") ? 1.f : 0.f;
+            float az = !strcmp(rot, "z") ? 1.f : 0.f;
+            mat4_irotate(mat, M_PI / 2, ax, ay, az);
+        } else {
+            mat4_itranslate(mat, off[0], off[1], off[2]);
+        }
+        if (getenv("GOXEL_MOVE_TEST_LEGACY")) {
+            // The old Move path, call for call, so the defect can be shown on
+            // the same fixture as the fix: it snapshots the active layer only
+            // and never touches a generated surface's region.
+            layer_t *al = goxel.image->active_layer;
+            volume_t *sv = volume_copy(al->volume);
+            volume_t *ss;
+            volume_t *tmp;
+            volume_merge(sv, mask, MODE_SUB, NULL);
+            ss = volume_copy(al->volume);
+            volume_merge(ss, mask, MODE_INTERSECT, NULL);
+            tmp = volume_copy(ss);
+            volume_move(tmp, mat);
+            volume_set(al->volume, sv);
+            volume_merge(al->volume, tmp, MODE_OVER, NULL);
+            volume_delete(tmp);
+            volume_delete(ss);
+            volume_delete(sv);
+            printf("move test: LEGACY path — only the active layer '%s' moved\n",
+                   al->name);
+        } else {
+            image_move_apply(mv, mat);
+            if (image_move_partial(mv))
+                printf("move test: NOTE a shape was only partly inside the selection\n");
+        }
+        image_move_end(mv);
+        mv = NULL;
+        image_history_push(goxel.image);
+        done_move = true;
+    } else if (f == 35 && done_move && !done_after) {
+        if (*dir) {
+            snprintf(path, sizeof(path), "%s/after.txt", dir);
+            slope_dump_cells(path);
+        }
+        done_after = true;
+    } else if (f == 40 && done_after && save && !done_save) {
+        printf("move test: save %s -> %d\n", save, goxel_export_to_file(save, "gox"));
+        fflush(stdout);
+        done_save = true;
+    } else if (f == 45 && undo && done_after && !done_undo) {
+        image_undo(goxel.image);
+        if (*dir) {
+            snprintf(path, sizeof(path), "%s/undo.txt", dir);
+            slope_dump_cells(path);
+        }
+        done_undo = true;
+    } else if (f >= 58) {
+        // Backstop: GOXEL_SHOTS_ONCE grabs frame 55 and quits by itself, so
+        // getting here means no shot was asked for.
+        printf("move test: done\n");
+        fflush(stdout);
+        goxel.quit = true;
+    }
+}
+
 static void slope_demo_step(void)
 {
     int aabb[2][3];
@@ -2176,6 +2428,10 @@ static void slope_demo_step(void)
     camera_t *cam = goxel.image->active_camera;
 
     if (!s_demo) return;
+    if (s_move_test) {
+        move_test_step();
+        return;
+    }
     if (s_extract) {
         pd_extract_step();
         return;
@@ -2294,13 +2550,18 @@ void slope_capture(void)
     static const int AT_PLACE[] = {105, 195, 285, 375, 465, 510};
     static const int AT_EDIT[] = {70, 100, 125, 150};
     static const int AT_PD[] = {115, 140, 165, 190};
+    // The move test finishes by frame 50; the shot is the auto-quit for the
+    // pass that does not undo, and shows the moved state.
+    static const int AT_MOVE[] = {55};
     static const char *dir = NULL;
     static int idx = 0;
     static const char *once = NULL;
-    const int *at = s_pd_demo ? AT_PD : s_edit_demo ? AT_EDIT
+    const int *at = s_move_test ? AT_MOVE
+                    : s_pd_demo ? AT_PD : s_edit_demo ? AT_EDIT
                         : s_place_demo ? AT_PLACE
                                  : s_shape_demo ? AT_SHAPES : AT;
-    int nb = s_pd_demo ? (int)(sizeof(AT_PD) / sizeof(AT_PD[0]))
+    int nb = s_move_test ? (int)(sizeof(AT_MOVE) / sizeof(AT_MOVE[0]))
+           : s_pd_demo ? (int)(sizeof(AT_PD) / sizeof(AT_PD[0]))
            : s_edit_demo ? (int)(sizeof(AT_EDIT) / sizeof(AT_EDIT[0]))
            : s_place_demo ? (int)(sizeof(AT_PLACE) / sizeof(AT_PLACE[0]))
            : s_shape_demo ? (int)(sizeof(AT_SHAPES) / sizeof(AT_SHAPES[0]))
@@ -2308,8 +2569,9 @@ void slope_capture(void)
     char path[512];
 
     // GOXEL_SHOTS_ONCE=<file>: grab a single frame of an opened document.
+    // The move test finishes by frame 50, so its shot is at 55.
     if (!once) once = getenv("GOXEL_SHOTS_ONCE") ?: "";
-    if (*once && goxel.frame_count >= 60) {
+    if (*once && goxel.frame_count >= (s_move_test ? 55 : 60)) {
         slope_grab(once);
         goxel.quit = true;
         return;
