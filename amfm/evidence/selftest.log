@@ -1,0 +1,29 @@
+0.000: Register script FillRandom                                   js_goxel_registerScript (src/script.c:719)
+0.000: Register script Dilate                                       js_goxel_registerScript (src/script.c:719)
+0.000: Register script VoxelSphere                                  js_goxel_registerScript (src/script.c:719)
+0.000: Loading scripts from C:\Users\laksu\AppData\Roaming\Goxel\/scripts
+ on_dir (src/script.c:922)
+[33;31m0.003: Cannot open C:\Users\laksu\AppData\Roaming\Goxel\/recent-files.txt: No such file or directory[m goxel_load_recent_files (src/goxel.c:432)
+0.003: Read settings file: C:\Users\laksu\AppData\Roaming\Goxel\/settings.ini settings_load (src/gui/settings.c:280)
+== AMFM #534 slope self test ==
+model bbox: [-64 -34 -25] .. [64 34 18]
+suggested region: [-64 -5 -5] .. [-44 5 -1] (1463 cells)
+before: cells=148383 region_cells=715
+[PASS] total cell count preserved
+[PASS] cells outside the region untouched
+[PASS] modifier layer created -- layers=2
+[PASS] modifier holds the region cells -- moved=715 expected=715
+[PASS] modifier keeps the region bounds
+[PASS] modifier parameters kept
+[PASS] the handle grabs a drag
+[PASS] dragging the handle changes the height -- before=12.00 after=6.00
+[PASS] releasing gives the tool back
+[PASS] undo restores the original document -- cells=148383 layers=1
+[PASS] redo restores the modifier -- cells=148383 layers=2
+0.102: Save to C:/projects_tools/goxel-lab/evidence/selftest.gox    save_to_file (src/formats/gox.c:259)
+0.123: Saved C:/projects_tools/goxel-lab/evidence/selftest.gox      sys_on_saved (src/system.c:312)
+[PASS] document saved as gox -- C:/projects_tools/goxel-lab/evidence/selftest.gox
+[PASS] reopen keeps the cell count -- pre=148383 post=148383
+[PASS] reopen keeps the modifier layer
+[PASS] reopen keeps the modifier parameters
+== self test: 15 checks, 0 failed ==

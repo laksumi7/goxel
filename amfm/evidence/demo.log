@@ -1,0 +1,18 @@
+0.000: Register script FillRandom                                   js_goxel_registerScript (src/script.c:719)
+0.000: Register script Dilate                                       js_goxel_registerScript (src/script.c:719)
+0.000: Register script VoxelSphere                                  js_goxel_registerScript (src/script.c:719)
+0.000: Loading scripts from C:\Users\laksu\AppData\Roaming\Goxel\/scripts
+ on_dir (src/script.c:922)
+[33;31m0.003: Cannot open C:\Users\laksu\AppData\Roaming\Goxel\/recent-files.txt: No such file or directory[m goxel_load_recent_files (src/goxel.c:432)
+0.003: Read settings file: C:\Users\laksu\AppData\Roaming\Goxel\/settings.ini settings_load (src/gui/settings.c:280)
+0.018: OpenGL version: 4.6.0 NVIDIA 595.79                          render_init (src/render.c:309)
+0.018: OpenGL renderer: NVIDIA GeForce RTX 4080 Laptop GPU/PCIe/SSE2 render_init (src/render.c:310)
+demo region: [-64 -34 -25]..[-44 34 18] rise 38.0
+slope: wrote C:/projects_tools/goxel-lab/evidence/frame060.png
+slope: wrote C:/projects_tools/goxel-lab/evidence/frame200.png
+1.926: Save to C:/projects_tools/goxel-lab/evidence/reopen.gox      save_to_file (src/formats/gox.c:259)
+1.954: Saved C:/projects_tools/goxel-lab/evidence/reopen.gox        sys_on_saved (src/system.c:312)
+demo: saved C:/projects_tools/goxel-lab/evidence/reopen.gox
+layer 0: name='Layer.1' cells=136447 slope=no
+layer 1: name='Slope 1' cells=11936 slope=yes
+slope: wrote C:/projects_tools/goxel-lab/evidence/frame340.png
