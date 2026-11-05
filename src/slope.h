@@ -1,0 +1,76 @@
+/* Goxel 3D voxels editor
+ *
+ * AMFM #534 LAB: selective, non-destructive planar slope surface modifier.
+ *
+ * A slope modifier is attached to a layer.  The layer keeps the underlying
+ * voxel occupancy (the source cells) but its cube geometry is replaced by a
+ * generated planar surface, so neighbouring layers keep their ordinary blocky
+ * voxels untouched.
+ */
+
+#ifndef SLOPE_H
+#define SLOPE_H
+
+#include "model3d.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+typedef struct layer layer_t;
+typedef struct inputs inputs_t;
+
+// Goxel is Z-up: the slope runs along X or Y and rises along Z.
+enum {
+    SLOPE_DIR_PX = 0,
+    SLOPE_DIR_NX,
+    SLOPE_DIR_PY,
+    SLOPE_DIR_NY,
+    SLOPE_DIR_COUNT,
+};
+
+typedef struct slope_mod {
+    int      aabb[2][3];  // Inclusive source-cell region replaced by the surface.
+    int      dir;         // SLOPE_DIR_*: horizontal direction the surface rises to.
+    float    rise;        // Height delta, in voxels, between the low and high edge.
+    uint32_t revision;
+    uint8_t  color[4];    // Surface colour (sampled from the source cells).
+    // Transient render cache: not copied, not hashed.
+    model3d_t *mesh;
+    uint32_t  mesh_hash;
+} slope_mod_t;
+
+slope_mod_t *slope_new(void);
+slope_mod_t *slope_copy(const slope_mod_t *other);
+void         slope_free(slope_mod_t *mod);
+uint32_t     slope_hash(const slope_mod_t *mod);
+
+// True when the layer's cube geometry is replaced by a generated surface.
+bool slope_replaces_voxels(const layer_t *layer);
+
+// Frame update for the viewport handles.  Must run before the tools so that
+// dragging a handle never paints voxels.
+void slope_iter(const inputs_t *inputs, const float viewport[4]);
+
+// Queue the generated surfaces of the current image.
+void slope_render(void);
+
+// Draw the live handles of the modifier being edited.
+void slope_render_handles(void);
+
+// Contextual action strip, called from the imgui pass.
+void slope_gui(void);
+
+// Headless verification of the modifier invariants (GOXEL_SELFTEST=1).
+void slope_selftest(void);
+
+// Drive the modifier through the normal editor path for screenshots
+// (GOXEL_SLOPE_DEMO=1).
+void slope_demo_begin(void);
+
+// Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set.
+void slope_capture(void);
+
+// Save numbered frames of the finished UI when GOXEL_SHOTS=<dir> is set.
+void slope_capture(void);
+
+#endif // SLOPE_H

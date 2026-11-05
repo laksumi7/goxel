@@ -177,8 +177,11 @@ static void loop_function(void *arg)
     GLFWmonitor *monitor;
     GLFWwindow *window = arg;
 
-    if (    !glfwGetWindowAttrib(window, GLFW_VISIBLE) ||
-             glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
+    if (    (!glfwGetWindowAttrib(window, GLFW_VISIBLE) ||
+             glfwGetWindowAttrib(window, GLFW_ICONIFIED)) &&
+            // AMFM #534: the frame-capture modes render into an invisible
+            // window, so they must keep iterating.
+            !getenv("GOXEL_SHOTS") && !getenv("GOXEL_SHOTS_ONCE")) {
         glfwWaitEvents();
         goto end;
     }
@@ -402,8 +405,23 @@ int main(int argc, char **argv)
         assert(window);
         glfwSetWindowPos(window, 0, 0);
     } else {
-        glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
-	window = glfwCreateWindow(width, height, "Goxel", NULL, NULL);
+        // AMFM #534 dev affordance: GOXEL_HEADLESS=1 runs without a visible
+        // window, GOXEL_WINDOW_GEOM=x,y,w,h places it on a chosen monitor.
+        // Default behaviour (maximized) is unchanged.
+        const char *headless = getenv("GOXEL_HEADLESS");
+        const char *geom = getenv("GOXEL_WINDOW_GEOM");
+        if (headless && atoi(headless)) {
+            glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+            window = glfwCreateWindow(1024, 1024, "Goxel", NULL, NULL);
+        } else if (geom) {
+            int gx = 0, gy = 0, gw = 1280, gh = 800;
+            sscanf(geom, "%d,%d,%d,%d", &gx, &gy, &gw, &gh);
+            window = glfwCreateWindow(gw, gh, "Goxel", NULL, NULL);
+            glfwSetWindowPos(window, gx, gy);
+        } else {
+            glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+            window = glfwCreateWindow(width, height, "Goxel", NULL, NULL);
+        }
         assert(window);
     }
 
@@ -411,7 +429,11 @@ int main(int argc, char **argv)
     glfwMakeContextCurrent(window);
     if (!DEFINED(EMSCRIPTEN))
         glfwSetScrollCallback(window, on_scroll);
-    glfwSwapInterval(1);
+    // A hidden window has no vsync to wait for; blocking on one can hang.
+    {
+        const char *nogui = getenv("GOXEL_HEADLESS");
+        glfwSwapInterval((nogui && atoi(nogui)) ? 0 : 1);
+    }
     glfwSetDropCallback(window, on_drop);
     glfwSetCharCallback(window, on_char);
     glfwSetWindowCloseCallback(window, on_close);
@@ -430,6 +452,16 @@ int main(int argc, char **argv)
 
     if (args.input)
         goxel_import_file(args.input, NULL);
+
+    // AMFM #534: headless verification of the slope modifier invariants.
+    if (getenv("GOXEL_SELFTEST")) {
+        slope_selftest();
+        goto end;
+    }
+
+    // AMFM #534: drive the modifier in the running editor for review shots.
+    if (getenv("GOXEL_SLOPE_DEMO"))
+        slope_demo_begin();
 
     if (args.script) {
         script_run_from_file(args.script, args.script_args_nb, args.script_args);

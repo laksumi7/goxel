@@ -36,6 +36,7 @@ void layer_delete(layer_t *layer)
     if (--layer->ref > 0) return;
     volume_delete(layer->volume);
     texture_delete(layer->image);
+    slope_free(layer->slope);
     free(layer);
 }
 
@@ -58,6 +59,13 @@ uint32_t layer_get_key(const layer_t *layer)
     key = XXH32(&layer->color, sizeof(layer->color), key);
     key = XXH32(&mat_key, sizeof(mat_key), key);
     key = XXH32(&layer->mode, sizeof(layer->mode), key);
+
+    // AMFM #534: the surface modifier is part of the layer identity, so it
+    // takes part in the render caches and in the undo history keys.
+    {
+        uint32_t slope_key = slope_hash(layer->slope);
+        key = XXH32(&slope_key, sizeof(slope_key), key);
+    }
 
     // Also hash the material pointer, to avoid some possible crashes with
     // goxel.render_layers cache.
@@ -84,6 +92,7 @@ layer_t *layer_copy(layer_t *other)
     layer->shape_key = other->shape_key;
     layer->mode = other->mode;
     memcpy(layer->color, other->color, sizeof(layer->color));
+    layer->slope = slope_copy(other->slope);
     return layer;
 }
 

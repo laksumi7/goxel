@@ -284,7 +284,9 @@ void save_to_file(const image_t *img, const char *path)
     chunk_write_finish(&c, out);
 
     preview = calloc(128 * 128, 4);
-    goxel_render_to_buf(preview, 128, 128, 4);
+    // A windowless run has no usable default framebuffer for the preview.
+    if (!getenv("GOXEL_HEADLESS"))
+        goxel_render_to_buf(preview, 128, 128, 4);
     png = img_write_to_mem(preview, 128, 128, 4, &size);
     chunk_write_all(out, "PREV", (char*)png, size);
     free(preview);
@@ -382,6 +384,23 @@ void save_to_file(const image_t *img, const char *path)
         }
         chunk_write_dict_value(&c, out, "visible", &layer->visible,
                                sizeof(layer->visible));
+
+        // AMFM #534: the surface modifier travels with its layer.  Older
+        // builds simply ignore these keys.
+        if (layer->slope) {
+            int32_t sp[7];
+            int k;
+            for (k = 0; k < 3; k++) {
+                sp[k] = layer->slope->aabb[0][k];
+                sp[3 + k] = layer->slope->aabb[1][k];
+            }
+            sp[6] = layer->slope->dir;
+            chunk_write_dict_value(&c, out, "slope", sp, sizeof(sp));
+            chunk_write_dict_value(&c, out, "slope-rise", &layer->slope->rise,
+                                   sizeof(layer->slope->rise));
+            chunk_write_dict_value(&c, out, "slope-color", layer->slope->color,
+                                   sizeof(layer->slope->color));
+        }
 
         chunk_write_finish(&c, out);
     }
@@ -532,9 +551,13 @@ int load_from_file(const char *path, bool replace)
     // XXX: should have a way to create a totally empty image instead.
     if (replace) {
         DL_FOREACH_SAFE(goxel.image->layers, layer, layer_tmp) {
-            volume_delete(layer->volume);
-            free(layer);
+            DL_DELETE(goxel.image->layers, layer);
+            // AMFM #534: must go through layer_delete(), which is refcounted
+            // and releases the layer's surface modifier.  The previous
+            // volume_delete()+free() bypassed both and corrupted the heap.
+            layer_delete(layer);
         }
+        goxel.image->active_layer = NULL;
         DL_FOREACH_SAFE(goxel.image->materials, mat, mat_tmp) {
             material_delete(mat);
         }
@@ -616,6 +639,29 @@ int load_from_file(const char *path, bool replace)
                 DICT_CPY("visible", layer->visible);
                 if (DICT_CPY("material", material_idx))
                     layer->material = get_material(goxel.image, material_idx);
+
+                // AMFM #534: restore the surface modifier of this layer.
+                if (strcmp(dict_key, "slope") == 0 &&
+                        dict_value_size == 7 * sizeof(int32_t)) {
+                    const int32_t *sp = (const int32_t *)dict_value;
+                    int k;
+                    if (!layer->slope) layer->slope = slope_new();
+                    for (k = 0; k < 3; k++) {
+                        layer->slope->aabb[0][k] = sp[k];
+                        layer->slope->aabb[1][k] = sp[3 + k];
+                    }
+                    layer->slope->dir = sp[6];
+                }
+                if (strcmp(dict_key, "slope-rise") == 0 &&
+                        dict_value_size == sizeof(float)) {
+                    if (!layer->slope) layer->slope = slope_new();
+                    memcpy(&layer->slope->rise, dict_value, sizeof(float));
+                }
+                if (strcmp(dict_key, "slope-color") == 0 &&
+                        dict_value_size == 4) {
+                    if (!layer->slope) layer->slope = slope_new();
+                    memcpy(layer->slope->color, dict_value, 4);
+                }
             }
         } else if (strncmp(c.type, "CAMR", 4) == 0) {
             camera = camera_new("unnamed");

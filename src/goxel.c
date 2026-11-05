@@ -690,6 +690,8 @@ int goxel_iter(const inputs_t *inputs)
         }
     }
     arrfree(goxel.hints);
+    // AMFM #534: run before the tools so a handle drag never paints voxels.
+    slope_iter(&inputs2, goxel.gui.viewport);
     goxel_mouse_in_view(goxel.gui.viewport, &inputs2, true);
     play_build_sound_if_needed();
     gesture3ds_iter();
@@ -999,6 +1001,9 @@ void goxel_render(const inputs_t *inputs)
     GL(glViewport(0, 0, goxel.screen_size[0] * goxel.screen_scale,
                         goxel.screen_size[1] * goxel.screen_scale));
     gui_render(inputs);
+
+    // AMFM #534: optional frame readback for review shots.
+    slope_capture();
 }
 
 static void render_export_viewport(const float viewport[4])
@@ -1142,8 +1147,12 @@ void goxel_render_view(const float viewport[4], bool render_mode)
     effects |= goxel.view_effects;
 
     for (layer = goxel_get_render_layers(true); layer; layer = layer->next) {
-        if (layer->visible && layer->volume)
-            render_volume(rend, layer->volume, layer->material, effects);
+        if (!layer->visible || !layer->volume) continue;
+        // AMFM #534: a layer with a surface modifier renders the generated
+        // surface instead of cube geometry.  Its voxels remain in the document
+        // as the source cell authority.
+        if (slope_replaces_voxels(layer)) continue;
+        render_volume(rend, layer->volume, layer->material, effects);
     }
 
     if (!box_is_null(goxel.image->active_layer->box))
@@ -1205,6 +1214,10 @@ void goxel_render_view(const float viewport[4], bool render_mode)
 
     render_axis_arrows(viewport);
     render_submit(&goxel.rend, viewport, goxel.back_color);
+    // AMFM #534: the generated surfaces are drawn straight to the viewport,
+    // so they have to go after the queued voxel items.
+    slope_render();
+    slope_render_handles();
 }
 
 void image_update(image_t *img);
@@ -1293,7 +1306,11 @@ const layer_t *goxel_get_render_layers(bool with_tool_preview)
             }
 
             // Don't merge different materials unless we do a boolean op.
-            no_merge = (goxel.render_layers == NULL) || (
+            // AMFM #534: a layer carrying a surface modifier must stay alone in
+            // the render list, otherwise its source cells would be merged into
+            // a neighbour and rendered as cubes.
+            no_merge = (goxel.render_layers == NULL) ||
+                l->slope || goxel.render_layers->prev->slope || (
                 (layer->mode == MODE_OVER) &&
                 (goxel.render_layers->prev->material != layer->material));
 

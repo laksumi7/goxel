@@ -291,5 +291,8 @@ void gui_app(void)
         (goxel.gui.current_panel == PANEL_RENDER ||
          PANELS[PANEL_RENDER].detached);
 
+    // AMFM #534: contextual surface-modifier strip.
+    slope_gui();
+
     gui_view_cube(goxel.gui.viewport[2] - 128, item_height + 2, 128, 128);
 }
