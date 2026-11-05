@@ -1,0 +1,63 @@
+0.000: Register script FillRandom                                   js_goxel_registerScript (src/script.c:719)
+0.000: Register script Dilate                                       js_goxel_registerScript (src/script.c:719)
+0.000: Register script VoxelSphere                                  js_goxel_registerScript (src/script.c:719)
+0.000: Loading scripts from C:\Users\laksu\AppData\Roaming\Goxel\/scripts
+ on_dir (src/script.c:922)
+[33;31m0.003: Cannot open C:\Users\laksu\AppData\Roaming\Goxel\/recent-files.txt: No such file or directory[m goxel_load_recent_files (src/goxel.c:432)
+0.003: Read settings file: C:\Users\laksu\AppData\Roaming\Goxel\/settings.ini settings_load (src/gui/settings.c:280)
+== AMFM #534 slope self test ==
+model bbox: [-64 -34 -25] .. [64 34 18]
+[PASS] the heap is intact on entry
+suggested region: [-64 -5 -5] .. [-44 5 -1] (1463 cells)
+before: cells=148383 region_cells=715
+[PASS] total cell count preserved
+[PASS] cells outside the region untouched
+[PASS] modifier layer created -- layers=2
+[PASS] modifier holds the region cells -- moved=715 expected=715
+[PASS] modifier keeps the region bounds
+[PASS] modifier parameters kept
+[PASS] the handle grabs a drag
+[PASS] dragging the handle changes the height -- before=12.00 after=6.00
+[PASS] releasing gives the tool back
+[PASS] undo restores the original document -- cells=148383 layers=1
+[PASS] redo restores the modifier -- cells=148383 layers=2
+[PASS] shape builds a real surface -- Slope: 36 vertices
+[PASS] shape never dips under its region -- Slope: zmin -5.004 floor -5.000
+[PASS] shape crown sits at the requested height -- Slope: zmax 5.000 want 5.000
+[PASS] the heap is intact after the shape -- Slope
+[PASS] shape builds a real surface -- Bevel: 36 vertices
+[PASS] shape never dips under its region -- Bevel: zmin -5.004 floor -5.000
+[PASS] shape crown sits at the requested height -- Bevel: zmax 5.000 want 5.000
+[PASS] the heap is intact after the shape -- Bevel
+[PASS] shape builds a real surface -- Cylinder: 294 vertices
+[PASS] shape never dips under its region -- Cylinder: zmin -5.004 floor -5.000
+[PASS] shape crown sits at the requested height -- Cylinder: zmax 4.996 want 5.000
+[PASS] the heap is intact after the shape -- Cylinder
+[PASS] shape builds a real surface -- Sphere: 1728 vertices
+[PASS] shape never dips under its region -- Sphere: zmin -5.004 floor -5.000
+[PASS] shape crown sits at the requested height -- Sphere: zmax 4.996 want 5.000
+[PASS] the heap is intact after the shape -- Sphere
+[PASS] total cell count preserved -- Bevel: 148383 -> 148383 cells
+[PASS] cells outside the region untouched -- Bevel
+[PASS] the modifier holds its region cells -- Bevel: 28956 cells held
+[PASS] the modifier carries its shape kind -- Bevel: kind=1
+[PASS] total cell count preserved -- Cylinder: 148383 -> 148383 cells
+[PASS] cells outside the region untouched -- Cylinder
+[PASS] the modifier holds its region cells -- Cylinder: 28462 cells held
+[PASS] the modifier carries its shape kind -- Cylinder: kind=2
+[PASS] total cell count preserved -- Sphere: 148383 -> 148383 cells
+[PASS] cells outside the region untouched -- Sphere
+[PASS] the modifier holds its region cells -- Sphere: 39054 cells held
+[PASS] the modifier carries its shape kind -- Sphere: kind=3
+[PASS] an existing shape can be re-edited -- rise 14.00 -> 18.00
+[PASS] deleting a base cell works -- 148383 -> 148382 cells
+[PASS] shape cells keep their identity through base edits -- Slope 1
+[PASS] shape cells keep their identity through base edits -- Bevel 2
+[PASS] shape cells keep their identity through base edits -- Cylinder 3
+[PASS] shape cells keep their identity through base edits -- Sphere 4
+0.196: Save to C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox save_to_file (src/formats/gox.c:259)
+0.241: Saved C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox sys_on_saved (src/system.c:312)
+[PASS] document saved as gox -- C:/projects_tools/goxel-lab/evidence/shapes/selftest.gox
+[PASS] reopen keeps the cell count -- pre=148382 post=148382
+[PASS] reopen keeps every modifier editable -- 4 of 4 modifiers
+== self test: 49 checks, 0 failed ==

@@ -10,8 +10,8 @@
 demo region: [-64 -34 -25]..[-44 34 18] rise 38.0
 slope: wrote C:/projects_tools/goxel-lab/evidence/frame060.png
 slope: wrote C:/projects_tools/goxel-lab/evidence/frame200.png
-1.926: Save to C:/projects_tools/goxel-lab/evidence/reopen.gox      save_to_file (src/formats/gox.c:259)
-1.954: Saved C:/projects_tools/goxel-lab/evidence/reopen.gox        sys_on_saved (src/system.c:312)
+1.777: Save to C:/projects_tools/goxel-lab/evidence/reopen.gox      save_to_file (src/formats/gox.c:259)
+1.805: Saved C:/projects_tools/goxel-lab/evidence/reopen.gox        sys_on_saved (src/system.c:312)
 demo: saved C:/projects_tools/goxel-lab/evidence/reopen.gox
 layer 0: name='Layer.1' cells=136447 slope=no
 layer 1: name='Slope 1' cells=11936 slope=yes

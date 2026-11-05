@@ -59,18 +59,23 @@ On the LAB machine, test windows go on the laptop built-in panel only
 
 ## What is in here
 
-* `src/slope.c`, `src/slope.h` — the surface modifier: region → generated
-  surface, viewport handle, contextual strip, self test, demo driver.
+* `src/slope.c`, `src/slope.h` — the surface modifier: four shape kinds
+  (slope, bevel, cylinder, sphere), region → generated surface, viewport handle,
+  contextual strip, self test, demo drivers.
 * `src/layer.{c,h}`, `src/goxel.c`, `src/gui/app.c`, `src/main.c`,
   `src/formats/gox.c` — integration: layer field + hash + copy, render skip and
-  generated-surface render, iter hook, strip entry, GOX persistence, and two
-  defect fixes (headless preview render, refcounted layer replacement).
-* `notes/P0-evidence.md` — what was proven and how.
-* `evidence/` — self test log, demo log, four rendered frames, and the two
-  saved documents (`selftest.gox`, `reopen.gox`).
+  generated-surface render, iter hook, strip entry, GOX persistence, and three
+  defect fixes (headless preview render, refcounted layer replacement, and a
+  four-byte heap overrun in the generated mesh).
+* `notes/P0-evidence.md` — the one-slope workflow, what was proven and how.
+* `notes/P0.2-shapes.md` — bevel, cylinder and sphere on the same path.
+* `evidence/` — self test log, demo log, rendered frames and the saved
+  documents. `evidence/shapes/` holds the four-shape run.
 
 ## Status
 
-P0.0 (pin + real asset opens) and P0.1 (one selective planar slope, end to end)
-plus the mandatory editable save/reopen are demonstrated headlessly, 15/15.
-**Owner GUI ergonomics are NOT signed off** — that needs the hands-on pass.
+P0.0 (pin + real asset opens), P0.1 (one selective planar slope, end to end)
+and the mandatory editable save/reopen are demonstrated headlessly, and Bevel,
+Cylinder and Sphere now run through the same selective path: 49 checks, 0 failed,
+three consecutive runs on the real ship. **Owner GUI ergonomics are NOT signed
+off** — that needs the hands-on pass.
