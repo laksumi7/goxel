@@ -604,6 +604,18 @@ int main(int argc, char **argv)
     if (getenv("GOXEL_MOVE_TEST"))
         slope_demo_begin_move_test();
 
+    // AMFM #534: move named cells into named layers (a turret's yaw and pitch
+    // stages become their own editable layers), or delete the cells a D line
+    // names (the smallest local hull relief), then save and quit.
+    {
+        const char *rg = getenv("GOXEL_REGROUP");
+        const char *ro = getenv("GOXEL_REGROUP_OUT");
+        if (rg && *rg && ro && *ro) {
+            slope_regroup_apply(rg, ro);
+            goto end;
+        }
+    }
+
     if (args.script) {
         script_run_from_file(args.script, args.script_args_nb, args.script_args);
         goto end;

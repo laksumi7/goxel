@@ -145,4 +145,9 @@ void slope_demo_begin_move_test(void);
 // single frame to the file named by GOXEL_SHOTS_ONCE.
 void slope_capture(void);
 
+// AMFM #534: move the cells named by a spec file into named layers, keeping the
+// id of every layer it does not touch, and delete the cells a D line names.
+// Returns the save result.
+int slope_regroup_apply(const char *spec_path, const char *out);
+
 #endif // SLOPE_H
