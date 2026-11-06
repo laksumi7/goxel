@@ -2402,6 +2402,27 @@ static void move_test_step(void)
         }
         done_after = true;
     } else if (f == 40 && done_after && save && !done_save) {
+        // GOXEL_MOVE_TEST_DROP_EMPTY=1: Goxel's loader leaves an empty
+        // placeholder layer behind and a save writes it out again, so a moved
+        // file would carry empty entries every consumer has to guess about.
+        // Same rule GOXEL_REGROUP applies: ordinary layers that hold nothing go,
+        // shape layers are never touched.
+        if (getenv("GOXEL_MOVE_TEST_DROP_EMPTY")) {
+            layer_t *l = goxel.image->layers, *next;
+            int n = 0;
+            while (l) {
+                next = l->next;
+                if (!l->slope && count_vol_cells(l->volume) == 0) {
+                    printf("move test: dropping empty layer '%s' (id %d)\n",
+                           l->name, l->id);
+                    image_delete_layer(goxel.image, l);
+                    n++;
+                }
+                l = next;
+            }
+            printf("move test: %d empty layer(s) dropped\n", n);
+            fflush(stdout);
+        }
         printf("move test: save %s -> %d\n", save, goxel_export_to_file(save, "gox"));
         fflush(stdout);
         done_save = true;
