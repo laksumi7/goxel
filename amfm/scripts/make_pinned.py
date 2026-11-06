@@ -139,7 +139,14 @@ def main():
             j = joints[mount]
             under = [p for p in j["pad_cells"]
                      if p[0] == j["yaw_cell"][0] and p[1] == j["yaw_cell"][1]]
-            hinge_cell = [j["yaw_cell"][0], j["yaw_cell"][1], j["pitch_hinge_xyz"][2]]
+            # The hinge marker has to name a cell its own group owns, so a mount
+            # whose hinge sits on the housing rather than on a moving cell pins
+            # the marker to the arm mounting cell the axle passes through.
+            hinge_cell = j.get("pitch_hinge_source_cell") \
+                or [j["yaw_cell"][0], j["yaw_cell"][1], j["pitch_hinge_xyz"][2]]
+            hinge_note = j.get("pitch_hinge_note") or \
+                "yaw/pitch interface, in the turntable column at barrel height; " \
+                "the pitch axis is the derived local right vector"
             markers += [
                 {"id": f"fx_{mount}_mount_pivot", "group_id": mount, "kind": "pivot",
                  "xyz": j["pad_centre_xyz"], "direction_xyz": j["yaw_axis_source"],
@@ -152,8 +159,7 @@ def main():
                 {"id": f"fx_{mount}_pitch_hinge", "group_id": f"{mount}_pitch", "kind": "pivot",
                  "xyz": j["pitch_hinge_xyz"], "direction_xyz": j["pitch_axis_source"],
                  "source_cell": hinge_cell,
-                 "note": "yaw/pitch interface, in the turntable column at barrel height; "
-                         "the pitch axis is the derived local right vector"},
+                 "note": hinge_note},
             ]
             for side in ("L", "R"):
                 markers.append({
