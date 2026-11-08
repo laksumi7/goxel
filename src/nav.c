@@ -1254,6 +1254,7 @@ bool nav_gox_validate(const char *path, char *why, size_t why_size)
 {
     image_t *saved = goxel.image, *tmp;
     layer_t *l;
+    nav_record_t *r;
     volume_iterator_t it;
     uint8_t c[4];
     int p[3];
@@ -1292,13 +1293,74 @@ bool nav_gox_validate(const char *path, char *why, size_t why_size)
                 if (c[3]) got_cells++;
             }
         }
-        if (got_layers != want_layers || got_cells != want_cells)
+        if (got_layers != want_layers || got_cells != want_cells) {
             snprintf(why, why_size,
                      "the candidate gox reads back as %d layer(s)/%d cell(s), "
                      "expected %d/%d", got_layers, got_cells,
                      want_layers, want_cells);
-        else
+        } else {
+            // PM rev5: counts are not meaning.  Every registry record must
+            // still own its object in the reloaded image — the layer id has
+            // to exist, a shape record's modifier must carry the recorded
+            // semantic fingerprint (kind/dir/closed/anchor/rise/extent) and
+            // still resolve its end face, and a cell record's anchor cell
+            // must still be occupied.  A focused semantic comparison, not a
+            // GOX parser rewrite.
             ok = true;
+            DL_FOREACH(s_records, r) {
+                layer_t *tl = NULL;
+                DL_FOREACH(tmp->layers, l) {
+                    if (l->id == r->layer_id) {
+                        tl = l;
+                        break;
+                    }
+                }
+                if (!tl) {
+                    snprintf(why, why_size,
+                             "record '%s' loses its layer %d on reload",
+                             r->id, r->layer_id);
+                    ok = false;
+                    break;
+                }
+                if (r->at == NAV_AT_SHAPE_END) {
+                    if (!tl->slope) {
+                        snprintf(why, why_size,
+                                 "record '%s' loses its shape modifier on "
+                                 "reload", r->id);
+                        ok = false;
+                    } else if (r->fp_kind >= 0 &&
+                               (tl->slope->kind != r->fp_kind ||
+                                tl->slope->dir != r->fp_dir ||
+                                tl->slope->closed != r->fp_closed ||
+                                tl->slope->anchor != r->fp_anchor ||
+                                fabsf(tl->slope->rise - r->fp_rise) > 1e-4f ||
+                                tl->slope->aabb[1][0] - tl->slope->aabb[0][0] +
+                                    1 != r->fp_ext[0] ||
+                                tl->slope->aabb[1][1] - tl->slope->aabb[0][1] +
+                                    1 != r->fp_ext[1] ||
+                                tl->slope->aabb[1][2] - tl->slope->aabb[0][2] +
+                                    1 != r->fp_ext[2])) {
+                        snprintf(why, why_size,
+                                 "record '%s' reloads with different authored "
+                                 "shape attributes", r->id);
+                        ok = false;
+                    } else if (!nav_ring(r, NULL, NULL)) {
+                        snprintf(why, why_size,
+                                 "record '%s' cannot resolve its end face on "
+                                 "the reloaded shape", r->id);
+                        ok = false;
+                    }
+                    if (!ok) break;
+                } else if (!tl->volume ||
+                           volume_get_alpha_at(tl->volume, NULL, r->cell) == 0) {
+                    snprintf(why, why_size,
+                             "record '%s' loses its anchor cell on reload",
+                             r->id);
+                    ok = false;
+                    break;
+                }
+            }
+        }
     }
     image_delete(goxel.image);
     goxel.image = saved;
@@ -1326,6 +1388,7 @@ int nav_save(const char *path, char *err, size_t err_size)
     char hex[65];
     char sidecar[600], base[256], why[160];
     char cand[640], cand_side[660], lg_gox[660], lg_side[680];
+    char lgp_gox[680], lgp_side[700];
     char esc[1024], esc2[1024], esc3[2048], esc4[1024];
     char *keep_export_path;
     const char *keep_export_fmt;
@@ -1469,46 +1532,69 @@ int nav_save(const char *path, char *err, size_t err_size)
     // restores the previous live pair (P0-1).
     snprintf(lg_gox, sizeof(lg_gox), "%s.lastgood", path);
     snprintf(lg_side, sizeof(lg_side), "%s.lastgood", sidecar);
+    snprintf(lgp_gox, sizeof(lgp_gox), "%s.lastgoodprev", path);
+    snprintf(lgp_side, sizeof(lgp_side), "%s.lastgoodprev", sidecar);
     had_gox = nav_gox_reads_ok(path);
     {
         FILE *probe = fopen(sidecar, "rb");
         had_side = probe != NULL;
         if (probe) fclose(probe);
     }
-    // The previous backup goes only now: the live pair is intact and the
-    // replacement is fully staged, so recovery never got worse at this step.
-    remove(lg_gox);
-    remove(lg_side);
+    // PM rev5: the previous backup is demoted one notch to .lastgoodprev
+    // instead of being deleted, so a discoverable backup pair exists at
+    // every moment and only the oldest generation is ever discarded.
+    if (nav_gox_reads_ok(lg_gox)) {
+        remove(lgp_gox);
+        if (rename(lg_gox, lgp_gox) != 0) remove(lg_gox);
+    }
+    {
+        FILE *probe = fopen(lg_side, "rb");
+        if (probe) {
+            fclose(probe);
+            remove(lgp_side);
+            if (rename(lg_side, lgp_side) != 0) remove(lg_side);
+        }
+    }
     if (had_gox && rename(path, lg_gox) != 0) {
         remove(cand);
         remove(cand_side);
         FAILS("cannot preserve the previous gox; nothing was published");
     }
     if (had_side && rename(sidecar, lg_side) != 0) {
-        if (had_gox) rename(lg_gox, path);
+        // PM rev5: the restore's own result is checked, never assumed.
+        if (!had_gox || rename(lg_gox, path) == 0)
+            FAILS("cannot preserve the previous sidecar; the previous pair "
+                  "was restored");
         remove(cand);
         remove(cand_side);
-        FAILS("cannot preserve the previous sidecar; the previous pair "
-              "was restored");
+        FAILS("cannot preserve the previous sidecar and automatic restore "
+              "failed: recover manually from %s / %s", lg_gox, lg_side);
     }
     if (nav_fault("promote_gox") || rename(cand, path) != 0) {
-        if (had_side) rename(lg_side, sidecar);
-        if (had_gox && rename(lg_gox, path) != 0)
-            FAILS("cannot promote the gox and cannot restore: the previous "
-                  "pair is at %s / %s", lg_gox, lg_side);
+        // PM rev5: a tested one-shot refusal and a genuinely failed
+        // rollback are different claims; only the first may say "restored".
+        bool ok_side = !had_side || rename(lg_side, sidecar) == 0;
+        bool ok_gox = !had_gox || rename(lg_gox, path) == 0;
         remove(cand);
         remove(cand_side);
-        FAILS("cannot promote the gox; the previous pair was restored");
+        if (ok_side && ok_gox)
+            FAILS("cannot promote the gox; the previous pair was restored");
+        FAILS("cannot promote the gox and automatic restore failed: the "
+              "recoverable pair is at %s / %s", lg_gox, lg_side);
     }
     if (nav_fault("promote_side") || rename(cand_side, sidecar) != 0) {
-        remove(path);   // the new gox alone would masquerade as a pair
-        if (had_side) rename(lg_side, sidecar);
-        if (had_gox && rename(lg_gox, path) != 0)
-            FAILS("cannot promote the sidecar and cannot restore: the "
-                  "previous pair is at %s / %s", lg_gox, lg_side);
+        bool ok_gox = remove(path) == 0;  // the new gox alone would lie
+        bool ok_side = !had_side || rename(lg_side, sidecar) == 0;
+        if (had_gox && rename(lg_gox, path) != 0) ok_gox = false;
         remove(cand);
         remove(cand_side);
-        FAILS("cannot promote the sidecar; the previous pair was restored");
+        if (!had_gox && !had_side && !ok_gox)
+            FAILS("cannot promote the sidecar and the staged gox could not "
+                  "be withdrawn: delete %s before retrying", path);
+        if (ok_gox && ok_side)
+            FAILS("cannot promote the sidecar; the previous pair was restored");
+        FAILS("cannot promote the sidecar and automatic restore failed: "
+              "recover manually from %s / %s", lg_gox, lg_side);
     }
     snprintf(s_doc, sizeof(s_doc), "%s", path);
     printf("nav: saved %s + %s (gox sha %s)\n", path, sidecar, hex);

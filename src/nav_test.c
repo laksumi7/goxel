@@ -1372,6 +1372,15 @@ int nav_test_run(const char *fixture, const char *outdir)
         bridge(cmd);
         CHECK(reply_has("saved") && reply_has("ok"),
               "rev4: a normal publish still succeeds");
+        {
+            char lgp[700];
+            FILE *pf;
+            snprintf(lgp, sizeof(lgp), "%s.lastgoodprev", path);
+            pf = fopen(lgp, "rb");
+            CHECK(pf != NULL,
+                  "rev5: the earlier backup is demoted, not deleted");
+            if (pf) fclose(pf);
+        }
         CHECK(goxel.image->export_path == NULL ||
               !strstr(goxel.image->export_path, ".new"),
               "P1: the staging path never becomes the remembered export path");
@@ -1404,6 +1413,47 @@ int nav_test_run(const char *fixture, const char *outdir)
                   "P0-2: a truncated gox with an intact header is refused (%s)",
                   whyb);
             remove(trunc);
+        }
+        // PM rev5: the roundtrip compares the equipment semantics, not just
+        // counts.  Re-anchor the muzzle onto a re-authored rise: the counts
+        // stay equal, but the published file no longer serializes what the
+        // record references — the candidate comparison must say so.
+        barrel = layer_by_kind(true);
+        if (barrel && barrel->slope) {
+            barrel->slope->rise += 0.02f;
+            barrel->slope->revision++;
+            goxel.image->active_layer = barrel;
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "untag id=test_muzzle base=%u nbase=%llu",
+                     s_rev, s_nrev);
+            bridge(cmd);
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=test_muzzle end=%s "
+                     "group=pd base=%u nbase=%llu", end_tok, s_rev, s_nrev);
+            bridge(cmd);
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "confirm id=test_muzzle base=%u nbase=%llu",
+                     s_rev, s_nrev);
+            bridge(cmd);
+            CHECK(!nav_gox_validate(path, whyb, sizeof(whyb)),
+                  "rev5: a record whose authored attributes no longer match "
+                  "the file is refused (%s)", whyb);
+            barrel->slope->rise -= 0.02f;
+            barrel->slope->revision++;
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "untag id=test_muzzle base=%u nbase=%llu",
+                     s_rev, s_nrev);
+            bridge(cmd);
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=test_muzzle end=%s "
+                     "group=pd base=%u nbase=%llu", end_tok, s_rev, s_nrev);
+            bridge(cmd);
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "confirm id=test_muzzle base=%u nbase=%llu",
+                     s_rev, s_nrev);
+            bridge(cmd);
+            CHECK(nav_gox_validate(path, whyb, sizeof(whyb)),
+                  "rev5: with the shape restored the semantic roundtrip passes");
         }
         // change the document so a new publish would carry different bytes
         body = body_layer_with_cells();
