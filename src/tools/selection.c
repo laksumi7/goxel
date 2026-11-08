@@ -17,6 +17,7 @@
  */
 
 #include "goxel.h"
+#include "slope.h"
 
 typedef struct {
     tool_t  tool;
@@ -122,15 +123,15 @@ static int count_sel_cells(void)
 static int on_pick(gesture3d_t *gest)
 {
     image_t *img = goxel.image;
-    int p[3];
-    float fpos[3];
+    int p[3], i;
     uint8_t on[4] = {255, 255, 255, 255};
     uint8_t off[4] = {0, 0, 0, 0};
 
-    p[0] = roundf(gest->pos[0]);
-    p[1] = roundf(gest->pos[1]);
-    p[2] = roundf(gest->pos[2]);
-    vec3_set(fpos, p[0], p[1], p[2]);
+    // SNAP_VOLUME returns the surface point (voxel centre + 0.5 * normal),
+    // so step half a voxel back along the normal into the voxel and floor:
+    // cell = floor(centre + 0.5) = floor(pos - 0.5 * normal).
+    for (i = 0; i < 3; i++)
+        p[i] = floorf(gest->pos[i] - 0.5f * gest->normal[i]);
 
     if (img->selection_mask == NULL) img->selection_mask = volume_new();
 
@@ -139,17 +140,22 @@ static int on_pick(gesture3d_t *gest)
         image_history_push(img);
         return 0;
     }
+    // The box spans [cell, cell+1), so its centre is cell + 0.5.
     if (!(gest->flags & GESTURE3D_FLAG_SHIFT)) {
         // Plain click: explicit replace (mirrors the box tool's replace
         // mode — the mode is visible in the GUI, never a silent erase).
         volume_clear(img->selection_mask);
-        bbox_from_extents(img->selection_box, VEC(p[0], p[1], p[2]),
-                          .5, .5, .5);
+        bbox_from_extents(img->selection_box,
+                VEC(p[0] + .5f, p[1] + .5f, p[2] + .5f), .5, .5, .5);
     } else if (box_is_null(img->selection_box)) {
-        bbox_from_extents(img->selection_box, VEC(p[0], p[1], p[2]),
-                          .5, .5, .5);
+        bbox_from_extents(img->selection_box,
+                VEC(p[0] + .5f, p[1] + .5f, p[2] + .5f), .5, .5, .5);
     } else {
-        bbox_extends_from_points(img->selection_box, 1, &fpos,
+        float lo[3] = {p[0], p[1], p[2]};
+        float hi[3] = {p[0] + 1, p[1] + 1, p[2] + 1};
+        bbox_extends_from_points(img->selection_box, 1, &lo,
+                                 img->selection_box);
+        bbox_extends_from_points(img->selection_box, 1, &hi,
                                  img->selection_box);
     }
     volume_set_at(img->selection_mask, NULL, p, on);
@@ -214,6 +220,9 @@ static void init(tool_t *tool_)
     tool_selection_t *tool = (void*)tool_;
     tool->mode = MODE_REPLACE;
     tool->current_mode = MODE_REPLACE;
+    // #541 rev10: the navigator session is mostly single-cell pointing, so
+    // pick mode starts on; uncheck it for the classic box drag.
+    tool->pick_mode = true;
     s_selection_tool = tool;
 }
 
@@ -307,6 +316,31 @@ static int gui(tool_t *tool_)
     gui_text(_("Selected: %d cells"), n_sel);
     if (n_sel && gui_button(_("Clear selection"), 0, 0))
         action_exec2(ACTION_reset_selection);
+    if (n_sel && gui_button(_("Copy coords"), 0, 0)) {
+        // Copy the exact picked cells ("x y z" per line) so the Owner can
+        // paste them straight to the Worker or anywhere else.
+        static char buf[4096];
+        volume_iterator_t iter;
+        uint8_t c[4];
+        int q[3], used = 0;
+        iter = volume_get_iterator(goxel.image->selection_mask,
+                                   VOLUME_ITER_VOXELS |
+                                   VOLUME_ITER_SKIP_EMPTY);
+        while (volume_iter(&iter, q)) {
+            int w;
+            volume_get_at(goxel.image->selection_mask, &iter, q, c);
+            if (!c[3]) continue;
+            w = snprintf(buf + used, sizeof(buf) - used, "%d %d %d\n",
+                         q[0], q[1], q[2]);
+            if (w < 0 || (size_t)w >= sizeof(buf) - used) break;
+            used += w;
+        }
+        if (used) sys_set_clipboard_text(NULL, buf);
+    }
+    // The Slope/Bevel strip used to pop up on every selection; now it is
+    // summoned on demand (#541 rev10, Owner request 2026-11-09).
+    if (gui_button(_("Shape ops"), 0, 0))
+        slope_ops_toggle();
 
     tool_gui_mask_mode(&tool->mode);
 

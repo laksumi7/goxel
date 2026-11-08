@@ -524,7 +524,9 @@ void goxel_reset(void)
     vec4_set(goxel.grid_color, 255, 255, 255, 127);
     vec4_set(goxel.image_box_color, 204, 204, 255, 255);
 
-    action_exec2(ACTION_tool_set_brush);
+    // AMFM #541 rev10: the navigator session starts in Selection (Shift+R);
+    // the Owner asked for it to be the default on launch.
+    action_exec2(ACTION_tool_set_selection);
     goxel.tool_radius = 0.5;
     goxel.painter = (painter_t) {
         .shape = &shape_cube,

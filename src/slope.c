@@ -1189,6 +1189,16 @@ static void slope_clear_layer(layer_t *layer)
     image_history_push(goxel.image);
 }
 
+// AMFM #541 rev10: the Slope/Bevel offer strip is no longer automatic.  It
+// shows only while the Owner has pressed the 'Shape ops' button in the
+// Selection tool (like Copy coords), so picking cells never pops it up.
+static bool s_ops_wanted = false;
+
+void slope_ops_toggle(void)
+{
+    s_ops_wanted = !s_ops_wanted;
+}
+
 void slope_gui(void)
 {
     layer_t *active = goxel.image->active_layer;
@@ -1217,7 +1227,7 @@ void slope_gui(void)
         else
             return;
     }
-    if (!s.mode && active && !active->slope &&
+    if (!s.mode && active && !active->slope && s_ops_wanted &&
             selection_aabb(aabb) && image_layer_can_edit(goxel.image, active)) {
         // Offer the operations next to the current selection.
         slope_mod_t tmp = {};

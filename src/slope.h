@@ -93,6 +93,10 @@ void slope_render_handles(void);
 // Contextual action strip, called from the imgui pass.
 void slope_gui(void);
 
+// AMFM #541 rev10: toggle the Slope/Bevel offer strip (no longer automatic;
+// the Selection tool's 'Shape ops' button drives this).
+void slope_ops_toggle(void);
+
 // Headless verification of the modifier invariants (GOXEL_SELFTEST=1).
 void slope_selftest(void);
 
