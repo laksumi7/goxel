@@ -1527,6 +1527,103 @@ int nav_test_run(const char *fixture, const char *outdir)
               "rev4: the retry after the faults publishes the new pair");
     }
 
+    // 17. PM rev7: a failed backup rotation never deletes the backup pair;
+    //     the publication aborts fail-closed and every recoverable file stays.
+    {
+        char hex_a[65], hex_b[65];
+        uint8_t sha_a[32];
+        char lg[700], lgs[700], lgp[700], cand[700];
+        FILE *pf;
+
+        snprintf(lg,  sizeof(lg),  "%s.lastgood", path);
+        snprintf(lgs, sizeof(lgs), "%s.lastgood", sidecar);
+        snprintf(lgp, sizeof(lgp), "%s.lastgoodprev", path);
+        goxel.image->active_layer = body_layer_with_cells();
+        bridge("set 6 6 6 30 30 30");
+        nav_sha256_file(path, sha_a);
+        nav_sha256_hex(sha_a, hex_a);
+        _putenv("GOXEL_NAV_FAULT=rotate_gox");
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        CHECK(call_fails(cmd) && reply_has("cannot rotate"),
+              "rev7: a failed gox backup rotation aborts the publication");
+        _putenv("GOXEL_NAV_FAULT=");
+        pf = fopen(lg, "rb");
+        CHECK(pf != NULL,
+              "rev7: the failed rotation kept .lastgood instead of deleting it");
+        if (pf) fclose(pf);
+        pf = fopen(lgp, "rb");
+        CHECK(pf != NULL, "rev7: .lastgoodprev also survived the failed rotation");
+        if (pf) fclose(pf);
+        pf = fopen(lgs, "rb");
+        CHECK(pf != NULL, "rev7: the sidecar backup was not touched either");
+        if (pf) fclose(pf);
+        nav_sha256_file(path, sha_a);
+        nav_sha256_hex(sha_a, hex_b);
+        CHECK(!strcmp(hex_a, hex_b),
+              "rev7: the live pair is byte-identical after the aborted rotation");
+        snprintf(cand, sizeof(cand), "%s.new", path);
+        CHECK(fopen(cand, "rb") == NULL, "rev7: no staging file stranded");
+        // and the next clean publish rotates normally again
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        bridge(cmd);
+        nav_sha256_file(path, sha_a);
+        nav_sha256_hex(sha_a, hex_b);
+        CHECK(reply_has("saved") && strcmp(hex_a, hex_b) != 0,
+              "rev7: the retry after the rotation fault publishes");
+        // the sidecar half of the rotation is guarded the same way
+        bridge("set 7 7 7 30 30 30");
+        nav_sha256_file(path, sha_a);
+        nav_sha256_hex(sha_a, hex_a);
+        _putenv("GOXEL_NAV_FAULT=rotate_side");
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        CHECK(call_fails(cmd) && reply_has("cannot rotate"),
+              "rev7: a failed sidecar backup rotation aborts the publication");
+        _putenv("GOXEL_NAV_FAULT=");
+        pf = fopen(lgs, "rb");
+        CHECK(pf != NULL, "rev7: the sidecar backup survived its own rotation fault");
+        if (pf) fclose(pf);
+        nav_sha256_file(path, sha_a);
+        nav_sha256_hex(sha_a, hex_b);
+        CHECK(!strcmp(hex_a, hex_b),
+              "rev7: the live pair is byte-identical after the sidecar abort");
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        bridge(cmd);
+        CHECK(reply_has("saved"), "rev7: the final retry publishes clean");
+
+        // Owner session requirement (2026-11-08): rcs is a first-class kind,
+        // tagged exactly like a muzzle so thruster anchors can be authored.
+        barrel = layer_by_kind(true);
+        if (barrel) {
+            char buf[16384];
+            size_t n = 0;
+            FILE *f;
+            goxel.image->active_layer = barrel;
+            select_layer(barrel);
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "tag kind=rcs id=test_rcs end=%s group=pd "
+                     "base=%u nbase=%llu", end_tok, s_rev, s_nrev);
+            bridge(cmd);
+            CHECK(reply_has("kind=rcs") && reply_has("status=draft"),
+                  "rev7: rcs is a first-class tag kind");
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "confirm id=test_rcs base=%u nbase=%llu",
+                     s_rev, s_nrev);
+            bridge(cmd);
+            CHECK(reply_has("confirmed"), "rev7: the rcs record confirms");
+            snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+            bridge(cmd);
+            CHECK(reply_has("saved"), "rev7: publishing with an rcs record works");
+            f = fopen(sidecar, "rb");
+            if (f) {
+                n = fread(buf, 1, sizeof(buf) - 1, f);
+                fclose(f);
+                buf[n] = 0;
+            }
+            CHECK(n > 0 && strstr(buf, "\"kind\": \"rcs\"") != NULL,
+                  "rev7: the sidecar carries the rcs kind verbatim");
+        }
+    }
+
     printf("nav test: all steps executed\n");
     fflush(stdout);
     printf("== nav test: %d checks, %d failed ==\n", s_checks, s_failed);

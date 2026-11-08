@@ -16,6 +16,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define NAV_MIN(a, b) ((a) < (b) ? (a) : (b))
 #define NAV_MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -255,6 +258,7 @@ const char *nav_kind_name(int kind)
     case NAV_KIND_EXHAUST: return "exhaust";
     case NAV_KIND_PIVOT:   return "pivot";
     case NAV_KIND_HINGE:   return "hinge";
+    case NAV_KIND_RCS:     return "rcs";
     default:               return "?";
     }
 }
@@ -1384,6 +1388,21 @@ static bool nav_fault(const char *which)
     return true;
 }
 
+// PM rev7: the backup rotation needs a rename that replaces an existing
+// destination.  The Windows CRT rename() refuses to overwrite (the rest of
+// the publication never hits that because the live path is renamed away
+// first), so the demotion uses MoveFileEx with REPLACE_EXISTING: nothing is
+// pre-deleted to make room and a failed demotion leaves both files exactly
+// where they were.  POSIX rename() already carries replace semantics.
+static int nav_rename_replace(const char *src, const char *dst)
+{
+#ifdef _WIN32
+    return MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+#else
+    return rename(src, dst);
+#endif
+}
+
 int nav_save(const char *path, char *err, size_t err_size)
 {
     nav_record_t *r;
@@ -1546,17 +1565,31 @@ int nav_save(const char *path, char *err, size_t err_size)
     // PM rev5: the previous backup is demoted one notch to .lastgoodprev
     // instead of being deleted, so a discoverable backup pair exists at
     // every moment and only the oldest generation is ever discarded.
+    // PM rev7: a failed demotion must never delete .lastgood — losing the
+    // only recoverable backup exactly when the filesystem misbehaves is
+    // the worst outcome.  rename() replaces an existing destination on
+    // both Windows (MinGW) and POSIX, so nothing is pre-deleted: if the
+    // demotion fails, every file stays exactly where it was and the
+    // publication aborts fail-closed with a message saying where they are.
+    bool rotate_ok = true;
     if (nav_gox_reads_ok(lg_gox)) {
-        remove(lgp_gox);
-        if (rename(lg_gox, lgp_gox) != 0) remove(lg_gox);
+        if (nav_fault("rotate_gox") || nav_rename_replace(lg_gox, lgp_gox) != 0)
+            rotate_ok = false;
     }
-    {
+    if (rotate_ok) {
         FILE *probe = fopen(lg_side, "rb");
         if (probe) {
             fclose(probe);
-            remove(lgp_side);
-            if (rename(lg_side, lgp_side) != 0) remove(lg_side);
+            if (nav_fault("rotate_side") || nav_rename_replace(lg_side, lgp_side) != 0)
+                rotate_ok = false;
         }
+    }
+    if (!rotate_ok) {
+        remove(cand);
+        remove(cand_side);
+        FAILS("cannot rotate the backup pair; nothing was published; the "
+              "previous pair stays recoverable under the %s / %s names",
+              lg_gox, lg_side);
     }
     if (had_gox && rename(path, lg_gox) != 0) {
         remove(cand);
@@ -1706,6 +1739,7 @@ static void record_color(const nav_record_t *r, bool bright, uint8_t col[4])
         case NAV_KIND_MUZZLE:  col[0] = 255; col[1] = 140; col[2] = 0;   break;
         case NAV_KIND_EXHAUST: col[0] = 0;   col[1] = 190; col[2] = 255; break;
         case NAV_KIND_PIVOT:   col[0] = 255; col[1] = 220; col[2] = 0;   break;
+        case NAV_KIND_RCS:     col[0] = 120; col[1] = 255; col[2] = 120; break;
         default:               col[0] = 255; col[1] = 120; col[2] = 180; break;
         }
         break;

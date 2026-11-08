@@ -532,7 +532,7 @@ static void cmd_tag(const char *args)
 
     if (!sem_guards(args)) return;
     if (!opt_get(args, "kind", kindname, sizeof(kindname))) {
-        out_add("err usage: tag kind=muzzle|exhaust|pivot|hinge end=+Y "
+        out_add("err usage: tag kind=muzzle|exhaust|pivot|hinge|rcs end=+Y "
                 "id=<name> [source=layer] [group=..] [label=..]\n");
         return;
     }
@@ -763,7 +763,7 @@ static void handle_line(const char *line)
     } else if (!strcmp(cmd, "help")) {
         out_add("commands: ping | state | set x y z [r g b] | del x y z | "
                 "shape x y z [rise] [name] | undo | redo\n"
-                "#541 navigator: selinfo | tag kind=muzzle|exhaust|pivot|hinge "
+                "#541 navigator: selinfo | tag kind=muzzle|exhaust|pivot|hinge|rcs "
                 "end=+Y|-.. id=<id> [source=..] [group=..] [label=..] "
                 "base=rev nbase=navrev | tags | confirm id=<id> base=rev "
                 "nbase=navrev | untag id=<id> base=rev nbase=navrev | "

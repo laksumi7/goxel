@@ -29,12 +29,15 @@ typedef struct layer layer_t;
 typedef struct image image_t;
 
 // What the marker means.  Muzzle/exhaust/pivot map to the canonical amfm.ship
-// v1 marker kinds; hinge is the pivot of a moving sub-assembly.
+// v1 marker kinds; hinge is the pivot of a moving sub-assembly.  rcs is a
+// thruster attachment point (Owner #541 session request): a cell or shape end
+// plus the thrust direction, tagged exactly like muzzle/exhaust.
 enum {
     NAV_KIND_MUZZLE = 0,
     NAV_KIND_EXHAUST,
     NAV_KIND_PIVOT,
     NAV_KIND_HINGE,
+    NAV_KIND_RCS,
     NAV_KIND_COUNT,
 };
 
