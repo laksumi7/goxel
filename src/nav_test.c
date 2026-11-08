@@ -4,18 +4,34 @@
  * GOXEL_NAV_TEST=<output dir>, with the fixture on GOXEL_NAV_FIXTURE.
  *
  * The test drives the exact bridge lines a worker would send, through the
- * exact dispatch, and the same nav calls the editor frame would make.  Every
- * claim of the P0 scope has one check:
+ * exact dispatch, and the same nav calls the editor frame would make.
+ *
+ * P0 scope:
  *   - the selection reports the exact object (layer ids, shape, both ends),
  *   - a tag proposes with both ends visible and the Owner confirms it,
  *   - a whole-part move carries the marker and the surface together,
  *   - a move outside the marker's cells leaves the marker alone,
  *   - a removed anchor cell flips the record to needs_review and publication
- *     stays closed until the Owner confirms or rejects,
+ *     stays closed,
  *   - undo does not resurrect a green light by itself,
  *   - navsave writes a gox + sidecar pair pinned by the gox SHA-256, and a
  *     reopen re-adopts it automatically,
  *   - a worker write carrying a stale base revision is refused.
+ *
+ * PM review #541 corrections (this revision):
+ *   (1) negative authored axes resolve to the physically correct cap face,
+ *       position and direction verified independently,
+ *   (2) a mirrored cell marker lands on the surviving cell (half-open span),
+ *   (3) Confirm validates current geometry: an invalidated meaning needs a
+ *       deliberate re-anchor, never a second click,
+ *   (4) re-authoring the shape (axis, anchor, ...) forces review through the
+ *       semantic fingerprint, while rigid moves keep the marker aligned,
+ *   (5) quoted spaced paths publish, and the sidecar is valid JSON,
+ *   (6) a pin mismatch on reopen keeps the records as needs_review instead
+ *       of silently clearing them, and an explicit Confirm accepts them,
+ *   (7) tag/confirm/untag require base= AND nbase=; a stale nbase is refused,
+ *   (8) a cell anchor must be inside the selection, not merely occupied;
+ *   - an orphaned draft is flagged, not left invisible.
  */
 
 #include "goxel.h"
@@ -30,16 +46,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static int s_checks, s_failed;
 
-#define CHECK(cond, ...) do {                                   \
-    s_checks++;                                                 \
-    if (!(cond)) { s_failed++; printf("  FAIL: "); }            \
-    else           printf("  ok  : ");                          \
-    printf(__VA_ARGS__);                                        \
-    if (!(cond)) printf("\n");                                  \
-    printf("\n");                                               \
+// NOTE: `cond` is evaluated exactly once — several checks call the bridge
+// through call_fails(), and a second evaluation would run the call twice.
+#define CHECK(cond, ...) do {                                           \
+    bool cond_ = (cond);                                                \
+    s_checks++;                                                         \
+    if (!cond_) { s_failed++; printf("  FAIL: "); }                     \
+    else        printf("  ok  : ");                                     \
+    printf(__VA_ARGS__);                                                \
+    if (!cond_) printf("\n");                                           \
+    printf("\n");                                                       \
+    fflush(stdout);                                                     \
 } while (0)
 
 // 64 KiB replies (the bridge drops instead of overflowing).
@@ -48,8 +69,10 @@ static char s_reply[64 * 1024 + 8];
 static const char *bridge(const char *line)
 {
     lab_bridge_test_call(line, s_reply, sizeof(s_reply));
-    if (getenv("GOXEL_NAV_VERBOSE"))
+    if (getenv("GOXEL_NAV_VERBOSE")) {
         printf("---- %s\n%s\n", line, s_reply);
+        fflush(stdout);
+    }
     return s_reply;
 }
 
@@ -62,6 +85,20 @@ static bool call_fails(const char *line)
 {
     bridge(line);
     return strstr(s_reply, "err ") != NULL;
+}
+
+// PM review #541 (7): the two revision tokens every semantic write carries.
+static unsigned s_rev;
+static unsigned long long s_nrev;
+
+static void read_revs(void)
+{
+    const char *q;
+    bridge("state");
+    q = strstr(s_reply, "rev ");
+    s_rev = q ? (unsigned)strtoul(q + 4, NULL, 10) : 0;
+    q = strstr(s_reply, "navrev ");
+    s_nrev = q ? strtoull(q + 7, NULL, 10) : 0;
 }
 
 static layer_t *layer_by_kind(bool want_slope)
@@ -134,6 +171,20 @@ static bool parse_tag_pos(const char *id, float out_pos[3])
                   &out_pos[2]) == 3;
 }
 
+static bool parse_tag_dir(const char *id, float out_dir[3])
+{
+    char pat[64];
+    const char *q;
+
+    snprintf(pat, sizeof(pat), "tag id=%s", id);
+    q = strstr(s_reply, pat);
+    if (!q) return false;
+    q = strstr(q, " dir ");
+    if (!q) return false;
+    return sscanf(q + 5, "%f %f %f", &out_dir[0], &out_dir[1],
+                  &out_dir[2]) == 3;
+}
+
 static bool parse_anchored_cell(const char *id, int out[3])
 {
     char pat[64];
@@ -147,14 +198,14 @@ static bool parse_anchored_cell(const char *id, int out[3])
     return sscanf(q + 14, "%d %d %d", &out[0], &out[1], &out[2]) == 3;
 }
 
-static bool parse_state_rev(unsigned *rev)
+// Read "picked x y z" from the tag reply (PM review #541 (1): the face the
+// token actually means, reported by the same authority that places it).
+static bool parse_picked(float out_pos[3])
 {
-    const char *q;
-
-    bridge("state");
-    q = strstr(s_reply, "rev ");
+    const char *q = strstr(s_reply, "picked ");
     if (!q) return false;
-    return sscanf(q + 4, "%u", rev) == 1;
+    return sscanf(q + 7, "%f %f %f", &out_pos[0], &out_pos[1],
+                  &out_pos[2]) == 3;
 }
 
 // A compact dump of what the document actually holds, for the evidence log.
@@ -181,27 +232,56 @@ static void dump_doc(const char *when)
                                   ? goxel.image->active_layer->name : "(none)");
 }
 
+// Copy one file over another (for the mismatched-pair and bad-sidecar cases).
+static bool copy_file(const char *src, const char *dst)
+{
+    FILE *a = fopen(src, "rb"), *b;
+    static char buf[64 * 1024];
+    size_t n;
+    bool ok = false;
+
+    if (!a) return false;
+    b = fopen(dst, "wb");
+    if (!b) { fclose(a); return false; }
+    ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), a)) > 0)
+        if (fwrite(buf, 1, n, b) != n) ok = false;
+    fclose(a);
+    fclose(b);
+    return ok;
+}
+
+static bool write_text(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    fputs(text, f);
+    fclose(f);
+    return true;
+}
+
 int nav_test_run(const char *fixture, const char *outdir)
 {
     layer_t *barrel, *body;
-    const slope_mod_t *m;
-    float u[3], pos0[3], pos1[3], exhaust0[3];
+    slope_mod_t *m;
+    float u[3], pos0[3], pos1[3], dirv[3], exhaust0[3];
     char end_tok[4] = "+Y";
-    char cmd[768], path[512], sidecar[560];
+    char cmd[900], path[512], sidecar[560];
     int dir = 2;
     int32_t a00 = 0;
     int anchor_cell[3] = {0, 0, 0};
     bool anchor_cell_known = false;
-    unsigned rev = 0, stale_base = 0;
+    unsigned stale_base = 0;
     FILE *f;
     volume_t *mask;
     image_move_t *mv;
     float tmat[4][4];
 
-    printf("== nav test (AMFM #541 P0) ==\n");
+    printf("== nav test (AMFM #541 P0 + PM review) ==\n");
     memset(pos0, 0, sizeof(pos0));
     memset(pos1, 0, sizeof(pos1));
     memset(exhaust0, 0, sizeof(exhaust0));
+    memset(dirv, 0, sizeof(dirv));
 
     // 0. The sha pin is only a pin if the digest is the standard one.
     CHECK(nav_sha256_known_answer(), "sha-256 known-answer vectors");
@@ -245,7 +325,6 @@ int nav_test_run(const char *fixture, const char *outdir)
         CHECK(mv2 != NULL, "raw machinery: move begins on %d cells", n_before);
         if (mv2) {
             image_move_apply(mv2, t2);
-            dump_doc("raw machinery: after +2 apply");
             image_move_end(mv2);
         }
         DL_FOREACH(goxel.image->layers, l) {
@@ -262,7 +341,6 @@ int nav_test_run(const char *fixture, const char *outdir)
               n_before, n_after);
         volume_delete(m2);
 
-        // And back again: the same machinery must be exactly reversible.
         m2 = volume_new();
         n_after = 0;
         DL_FOREACH(goxel.image->layers, l) {
@@ -318,11 +396,15 @@ int nav_test_run(const char *fixture, const char *outdir)
               reply_has("stale="),
               "selinfo gives shape params, both ends, rev and stale flags");
         CHECK(reply_has("selrev "), "selinfo carries the document revision");
+        CHECK(reply_has("sel=1 ACTIVE"),
+              "PM8: selinfo marks the selected shape apart from inventory");
 
         // 3. A worker proposal: both ends are on the table and the token is
-        //    what the draft means.
+        //    what the draft means.  PM7: the write carries both tokens.
+        read_revs();
         snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=test_muzzle end=%s "
-                 "group=pd label=left barrel muzzle", end_tok);
+                 "group=pd label=\"left barrel muzzle\" base=%u nbase=%llu",
+                 end_tok, s_rev, s_nrev);
         bridge(cmd);
         CHECK(reply_has("status=draft") && reply_has("ends axis="),
               "tag %s proposes a draft with both ends shown", end_tok);
@@ -333,7 +415,10 @@ int nav_test_run(const char *fixture, const char *outdir)
               "the draft position reads back");
 
         // 4. The Owner confirms it in the navigator.
-        bridge("confirm test_muzzle");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
         CHECK(reply_has("status=confirmed"), "confirm accepts the draft");
 
         // 5. A whole-assembly move carries the marker with the geometry.
@@ -377,16 +462,90 @@ int nav_test_run(const char *fixture, const char *outdir)
         CHECK(reply_has("status=confirmed"),
               "the muzzle is still confirmed after the move");
 
+        // 5b. PM review follow-up: a repeated drag replays from the snapshot,
+        //     so cumulative applies +1 +2 +3 land on +3, never on +6.
+        {
+            float posA[3];
+            bridge("tags");
+            parse_tag_pos("test_muzzle", posA);
+            mask = volume_new();
+            {
+                layer_t *l;
+                volume_iterator_t iter;
+                uint8_t c[4];
+                int p[3];
+                DL_FOREACH(goxel.image->layers, l) {
+                    if (!l->volume) continue;
+                    iter = volume_get_iterator(l->volume,
+                                               VOLUME_ITER_VOXELS |
+                                               VOLUME_ITER_SKIP_EMPTY);
+                    while (volume_iter(&iter, p)) {
+                        volume_get_at(l->volume, &iter, p, c);
+                        if (c[3]) add_cell(mask, p[0], p[1], p[2]);
+                    }
+                }
+            }
+            mv = image_move_begin(goxel.image, mask);
+            if (mv) {
+                float tm[4][4];
+                memcpy(tm, tmat, sizeof(tm));
+                tm[3][0] = 1.f; image_move_apply(mv, tm);
+                tm[3][0] = 2.f; image_move_apply(mv, tm);
+                tm[3][0] = 3.f; image_move_apply(mv, tm);
+                image_move_end(mv);
+                image_history_push(goxel.image);
+            }
+            volume_delete(mask);
+            bridge("tags");
+            CHECK(parse_tag_pos("test_muzzle", pos1) &&
+                  fabsf(pos1[0] - posA[0] - 3.f) < 1e-3f,
+                  "PM-follow: three cumulative applies move the marker +3, "
+                  "not +6");
+            // and back again
+            mask = volume_new();
+            {
+                layer_t *l;
+                volume_iterator_t iter;
+                uint8_t c[4];
+                int p[3];
+                DL_FOREACH(goxel.image->layers, l) {
+                    if (!l->volume) continue;
+                    iter = volume_get_iterator(l->volume,
+                                               VOLUME_ITER_VOXELS |
+                                               VOLUME_ITER_SKIP_EMPTY);
+                    while (volume_iter(&iter, p)) {
+                        volume_get_at(l->volume, &iter, p, c);
+                        if (c[3]) add_cell(mask, p[0], p[1], p[2]);
+                    }
+                }
+            }
+            mv = image_move_begin(goxel.image, mask);
+            if (mv) {
+                float tm[4][4];
+                memcpy(tm, tmat, sizeof(tm));
+                tm[3][0] = -3.f; image_move_apply(mv, tm);
+                image_move_end(mv);
+                image_history_push(goxel.image);
+            }
+            volume_delete(mask);
+        }
+
         // 6. A cell marker on the body: it moves with its own assembly and
         //    does NOT move when only the barrel moves.
         if (body) {
             goxel.image->active_layer = body;
             select_layer(body);
             dump_doc("before the cell-marker step");
-            bridge("tag kind=exhaust id=test_exhaust end=+Z group=pd");
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "tag kind=exhaust id=test_exhaust "
+                     "end=+Z group=pd base=%u nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
             CHECK(reply_has("status=draft") && reply_has("anchored cell"),
                   "a cell exhaust proposes on ordinary voxels");
-            bridge("confirm test_exhaust");
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "confirm id=test_exhaust base=%u "
+                     "nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
             bridge("tags");
             parse_tag_pos("test_exhaust", exhaust0);
 
@@ -404,19 +563,33 @@ int nav_test_run(const char *fixture, const char *outdir)
             CHECK(parse_tag_pos("test_exhaust", pos1) &&
                   fabsf(pos1[0] - exhaust0[0]) < 1e-3f,
                   "the exhaust stayed while only the barrel moved");
+            // put the barrel back so later geometry checks read cleanly
+            mv = image_move_begin(goxel.image, goxel.image->selection_mask);
+            if (mv) {
+                tmat[3][0] = -1.f;
+                image_move_apply(mv, tmat);
+                image_move_end(mv);
+            }
         }
     }
 
     // 7. Removing the anchor cell is review; publication is refused; undo
-    //    does not resurrect the green light by itself.
+    //    does not resurrect the green light; and PM3: a second click cannot
+    //    bless an invalidated meaning — it needs a deliberate re-anchor.
     if (body && body->volume) {
         goxel.image->active_layer = body;
         select_layer(body);
         snprintf(path, sizeof(path), "%s/navtest_save.gox",
                  outdir && *outdir ? outdir : ".");
-        bridge("tag kind=pivot id=test_pivot end=+Z group=pd");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=pivot id=test_pivot end=+Z "
+                 "group=pd base=%u nbase=%llu", s_rev, s_nrev);
+        bridge(cmd);
         anchor_cell_known = parse_anchored_cell("test_pivot", anchor_cell);
-        bridge("confirm test_pivot");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_pivot base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
         bridge("tags");
         CHECK(reply_has("test_pivot") && reply_has("status=confirmed"),
               "the pivot is confirmed before the edit");
@@ -442,15 +615,233 @@ int nav_test_run(const char *fixture, const char *outdir)
             bridge("tags");
             CHECK(reply_has("status=needs_review"),
                   "undo does not resurrect the marker by itself");
-            bridge("confirm test_pivot");
+            // PM review #541 (3): the geometry came back with the undo, but
+            // the meaning was invalidated — Confirm must refuse and demand a
+            // deliberate re-anchor.
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "confirm id=test_pivot base=%u "
+                     "nbase=%llu", s_rev, s_nrev);
+            CHECK(call_fails(cmd) && reply_has("re-anchor"),
+                  "PM3: confirm refuses an invalidated meaning");
+            // The deliberate re-anchor: untag, tag again, confirm.  The undo
+            // restored an older selection, so the Owner's click is mirrored
+            // by selecting the body again first.
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "untag id=test_pivot base=%u "
+                     "nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
+            if (body) select_layer(body);
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "tag kind=pivot id=test_pivot end=+Z "
+                     "group=pd base=%u nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "confirm id=test_pivot base=%u "
+                     "nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
             CHECK(reply_has("status=confirmed"),
-                  "explicit re-acceptance clears review");
+                  "PM3: a deliberate re-anchor (untag+tag+confirm) restores "
+                  "the marker");
             // The exhaust shared the anchor cell, so it went to review too;
-            // each marker needs its own explicit re-acceptance.
-            bridge("confirm test_exhaust");
+            // each marker needs its own deliberate re-anchor.
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "confirm id=test_exhaust base=%u "
+                     "nbase=%llu", s_rev, s_nrev);
+            CHECK(call_fails(cmd), "PM3: the other invalidated marker also "
+                  "refuses a bare confirm");
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "untag id=test_exhaust base=%u "
+                     "nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
+            if (body) select_layer(body);
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "tag kind=exhaust id=test_exhaust "
+                     "end=+Z group=pd base=%u nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "confirm id=test_exhaust base=%u "
+                     "nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
             CHECK(reply_has("test_exhaust") && reply_has("status=confirmed"),
-                  "the other invalidated marker is re-accepted too");
+                  "PM3: and re-anchors the same way");
         }
+    }
+
+    // 7b. PM review #541 (1,4): a negative authored axis.  Flipping the
+    //     modifier's run direction is a re-authoring (fingerprint), and a
+    //     tag on the flipped axis must resolve to the min-coordinate cap
+    //     face with the direction pointing along the signed axis.
+    barrel = layer_by_kind(true);
+    if (barrel && barrel->slope) {
+        m = barrel->slope;
+        m->dir = (m->dir == SLOPE_DIR_PY) ? SLOPE_DIR_NY : SLOPE_DIR_NX;
+        m->revision++;
+        nav_revalidate();
+        bridge("tags");
+        CHECK(reply_has("test_muzzle") && reply_has("re-authored"),
+              "PM4: flipping the authored axis is caught as a re-authoring");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        CHECK(call_fails(cmd), "PM3: the re-authored muzzle cannot be "
+              "re-confirmed");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "untag id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        goxel.image->active_layer = barrel;
+        select_layer(barrel);
+        {
+            char neg_tok[4];
+            int a = (dir == SLOPE_DIR_PX || dir == SLOPE_DIR_NX) ? 0 : 1;
+            // The flipped axis is always the negative variant (PX->NX, PY->NY).
+            snprintf(neg_tok, sizeof(neg_tok), "-%c",
+                     (dir == SLOPE_DIR_PX || dir == SLOPE_DIR_NX) ? 'X' : 'Y');
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=neg_probe end=%s "
+                     "base=%u nbase=%llu", neg_tok, s_rev, s_nrev);
+            bridge(cmd);
+            {
+                float picked[3];
+                CHECK(parse_picked(picked) &&
+                      fabsf(picked[a] - (float)m->aabb[0][a]) < 1e-3f,
+                      "PM1: on the negative axis 'picked' is the min-face "
+                      "the signed axis points at");
+            }
+            bridge("tags");
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "confirm id=neg_probe base=%u "
+                     "nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
+            bridge("tags");
+            CHECK(parse_tag_dir("neg_probe", dirv) &&
+                  fabsf(dirv[a] + 1.f) < 1e-3f,
+                  "PM1: and the emitted direction points along the signed "
+                  "axis, not the coordinate max");
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "untag id=neg_probe base=%u nbase=%llu",
+                     s_rev, s_nrev);
+            bridge(cmd);
+        }
+        // restore the authored axis and re-anchor the muzzle for later steps
+        m->dir = dir;
+        m->revision++;
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=test_muzzle end=%s "
+                 "group=pd base=%u nbase=%llu", end_tok, s_rev, s_nrev);
+        bridge(cmd);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        CHECK(reply_has("status=confirmed"),
+              "the muzzle is re-anchored on the restored axis");
+    }
+
+    // 7c. PM review #541 (5): the cap centre rides the anchor plane, not the
+    //     region mid-plane: a Floor-anchored barrel's cap sits at floor+rise.
+    barrel = layer_by_kind(true);
+    if (barrel && barrel->slope) {
+        m = barrel->slope;
+        m->anchor = SLOPE_ANCHOR_FLOOR;
+        m->revision++;
+        nav_revalidate();
+        bridge("tags");
+        CHECK(reply_has("re-authored"),
+              "PM4: changing the anchor plane is caught as a re-authoring");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "untag id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=test_muzzle end=%s "
+                 "group=pd base=%u nbase=%llu", end_tok, s_rev, s_nrev);
+        bridge(cmd);
+        bridge("tags");
+        CHECK(parse_tag_pos("test_muzzle", pos1) &&
+              fabsf(pos1[2] - ((float)m->aabb[0][2] + m->rise)) < 1e-3f,
+              "PM5: a Floor-anchored cap centre is floor+rise, not the "
+              "region mid-plane");
+        m->anchor = SLOPE_ANCHOR_MID;
+        m->revision++;
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "untag id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=test_muzzle end=%s "
+                 "group=pd base=%u nbase=%llu", end_tok, s_rev, s_nrev);
+        bridge(cmd);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+    }
+
+    // 7d. PM review #541 (8): a disconnected selection must anchor inside
+    //     the selection, not on the bounding-box centre nobody selected.
+    body = body_layer_with_cells();
+    if (body && body->volume) {
+        int bb[2][3];
+        goxel.image->active_layer = body;
+        if (goxel.image->selection_mask)
+            volume_delete(goxel.image->selection_mask);
+        goxel.image->selection_mask = volume_new();
+        volume_get_bbox(body->volume, bb, false);
+        add_cell(goxel.image->selection_mask, bb[0][0], bb[0][1], bb[0][2]);
+        add_cell(body->volume, bb[0][0], bb[0][1], bb[0][2]);
+        if (bb[1][0] > bb[0][0] + 2) {
+            add_cell(goxel.image->selection_mask, bb[1][0], bb[0][1], bb[0][2]);
+            add_cell(body->volume, bb[1][0], bb[0][1], bb[0][2]);
+        }
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=pivot id=sel_probe end=+Z "
+                 "base=%u nbase=%llu", s_rev, s_nrev);
+        bridge(cmd);
+        {
+            int ac[3];
+            bool in_sel = false, on_layer = false;
+            if (parse_anchored_cell("sel_probe", ac)) {
+                in_sel = volume_get_alpha_at(goxel.image->selection_mask,
+                                             NULL, ac) != 0;
+                on_layer = volume_get_alpha_at(body->volume, NULL, ac) != 0;
+            }
+            CHECK(in_sel && on_layer,
+                  "PM8: the anchor of a disconnected selection is inside "
+                  "both the selection and the layer");
+        }
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "untag id=sel_probe base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+    }
+
+    // 7e. PM follow-up: an orphaned draft is flagged, not left invisible.
+    body = body_layer_with_cells();
+    if (body && body->volume) {
+        goxel.image->active_layer = body;
+        select_layer(body);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=pivot id=draft_orphan end=+Z "
+                 "base=%u nbase=%llu", s_rev, s_nrev);
+        bridge(cmd);
+        if (parse_anchored_cell("draft_orphan", anchor_cell)) {
+            snprintf(cmd, sizeof(cmd), "del %d %d %d", anchor_cell[0],
+                     anchor_cell[1], anchor_cell[2]);
+            bridge(cmd);
+            nav_revalidate();
+            bridge("tags");
+            CHECK(reply_has("draft_orphan") && reply_has("status=needs_review"),
+                  "PM-follow: an invalidated draft is flagged, not invisible");
+            bridge("undo");
+            body = body_layer_with_cells();
+            if (body) goxel.image->active_layer = body;
+            nav_revalidate();
+        }
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "untag id=draft_orphan base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
     }
 
     // 8. The pair: gox + sidecar, pinned; then a reopen re-adopts.
@@ -485,6 +876,7 @@ int nav_test_run(const char *fixture, const char *outdir)
         // The editor's own open flow lands on a layer that can be painted;
         // a replaced load leaves the active layer unset otherwise.
         slope_ensure_art_layer();
+        nav_notify_opened(path);   // the editor's open action re-settles here
         nav_check_document();
         dump_doc("after reopen");
         CHECK(rc == 0, "reopen %s -> rc=%d", path, rc);
@@ -495,36 +887,231 @@ int nav_test_run(const char *fixture, const char *outdir)
               "nothing in review survives a clean reopen");
     }
 
-    // 9. A stale base revision is refused, deterministically.
+    // 8b. PM review #541 (6): a pin mismatch on reopen keeps the records as
+    //     needs_review (recoverable meaning) and an explicit Confirm accepts
+    //     the changed document; publication stays closed until then.
+    {
+        int rc;
+        body = body_layer_with_cells();
+        goxel.image->active_layer = body;
+        bridge("set 7 7 7 12 34 56");          // a real edit after publishing
+        goxel_export_to_file(path, "gox");     // the gox bytes move on
+        image_delete(goxel.image);
+        goxel.image = image_new();
+        rc = load_from_file(path, true);
+        slope_ensure_art_layer();
+        nav_notify_opened(path);   // the editor's open action re-settles here
+        nav_check_document();
+        CHECK(rc == 0, "reopen the changed gox -> rc=%d", rc);
+        bridge("tags");
+        CHECK(reply_has("test_muzzle") && reply_has("status=needs_review") &&
+              reply_has("does not pin"),
+              "PM6: a pin mismatch keeps the records as needs_review, not "
+              "silently cleared");
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        CHECK(call_fails(cmd), "PM6: publication stays closed over the "
+              "mismatched records");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        CHECK(reply_has("status=confirmed"),
+              "PM6: an explicit Confirm is the Owner's acceptance of the "
+              "changed document");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_exhaust base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_pivot base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        bridge(cmd);
+        CHECK(reply_has("saved"), "PM6: after the acceptance the pair "
+              "publishes and re-pins");
+    }
+
+    // 8c. PM review #541 (5): a spaced Windows path publishes through the
+    //     bridge (quoted path=) and the sidecar round-trips through adopt.
+    {
+        char spaced[600], sside[640];
+        snprintf(cmd, sizeof(cmd), "%s/nav test",
+                 outdir && *outdir ? outdir : ".");
+#ifdef _WIN32
+        mkdir(cmd);
+#else
+        mkdir(cmd, 0777);
+#endif
+        snprintf(spaced, sizeof(spaced), "%s/nav test/spaced ship.gox",
+                 outdir && *outdir ? outdir : ".");
+        snprintf(cmd, sizeof(cmd), "navsave path=\"%s\"", spaced);
+        bridge(cmd);
+        CHECK(reply_has("saved") && reply_has("ok"),
+              "PM5: a quoted path with spaces publishes through the bridge");
+        f = fopen(spaced, "rb");
+        CHECK(f != NULL, "the spaced gox really exists");
+        if (f) fclose(f);
+        nav_sidecar_path(spaced, sside, sizeof(sside));
+        f = fopen(sside, "rb");
+        CHECK(f != NULL, "the spaced sidecar really exists");
+        if (f) fclose(f);
+        snprintf(cmd, sizeof(cmd), "navadopt path=\"%s\"", spaced);
+        bridge(cmd);
+        CHECK(reply_has("adopted"), "PM5: the spaced pair re-adopts "
+              "(escaped paths parse back)");
+        // The real art directory on Windows: backslashes and spaces.  The
+        // sidecar must still be valid JSON and must parse back.
+        {
+            char bs[600], bside[640];
+            char *q;
+            snprintf(bs, sizeof(bs), "%s", spaced);
+            for (q = bs; *q; q++) if (*q == '/') *q = '\\';
+            snprintf(cmd, sizeof(cmd), "navsave path=\"%s\"", bs);
+            bridge(cmd);
+            CHECK(reply_has("saved") && reply_has("ok"),
+                  "PM5: a backslash Windows path publishes through the "
+                  "bridge");
+            nav_sidecar_path(bs, bside, sizeof(bside));
+            f = fopen(bside, "rb");
+            CHECK(f != NULL, "the backslash sidecar really exists");
+            if (f) fclose(f);
+            snprintf(cmd, sizeof(cmd), "navadopt path=\"%s\"", bs);
+            bridge(cmd);
+            CHECK(reply_has("adopted 3"), "PM5: the backslash pair re-adopts "
+                  "(escaped backslashes parse back)");
+        }
+    }
+
+    // 8d. PM follow-up: a duplicate-id sidecar is rejected as a unit and
+    //     cannot partially overwrite the working registry.
+    {
+        char dupgox[600], dupside[640];
+        snprintf(dupgox, sizeof(dupgox), "%s/navtest_dup.gox",
+                 outdir && *outdir ? outdir : ".");
+        copy_file(path, dupgox);
+        nav_sidecar_path(dupgox, dupside, sizeof(dupside));
+        write_text(dupside,
+            "{ \"format\": \"amfm.nav\", \"schema_version\": 1,\n"
+            " \"source_gox\": \"x\", \"source_sha256\": \"0\","
+            " \"doc_key\": 0,\n"
+            " \"records\": [\n"
+            "  {\"id\": \"dup\", \"kind\": \"pivot\", \"at\": \"cell\","
+            " \"layer_id\": 1, \"cell\": [0,0,0], \"dir\": [0,0,1],"
+            " \"status\": \"confirmed\"},\n"
+            "  {\"id\": \"dup\", \"kind\": \"muzzle\", \"at\": \"cell\","
+            " \"layer_id\": 1, \"cell\": [0,0,0], \"dir\": [0,0,1],"
+            " \"status\": \"confirmed\"}\n"
+            " ] }\n");
+        snprintf(cmd, sizeof(cmd), "navadopt path=%s", dupgox);
+        bridge(cmd);
+        CHECK(reply_has("err navadopt failed"),
+              "PM-follow: a duplicate-id sidecar is rejected as a unit");
+        bridge("tags");
+        CHECK(reply_has("test_muzzle"),
+              "PM-follow: the rejected adopt left the working registry "
+              "untouched");
+        remove(dupgox);
+        remove(dupside);
+    }
+
+    // 9. A stale base revision is refused, deterministically; PM7: so is a
+    //    stale registry token, and a missing token is an explicit error.
     body = body_layer_with_cells();
     goxel.image->active_layer = body;
-    if (parse_state_rev(&rev)) {
-        snprintf(cmd, sizeof(cmd),
-                 "set 0 0 0 90 90 90 base=%u", rev);   // fresh write: passes
+    read_revs();
+    {
+        snprintf(cmd, sizeof(cmd), "set 0 0 0 90 90 90 base=%u", s_rev);
         CHECK(!call_fails(cmd), "a fresh base= passes (control)");
         bridge("undo");
-        stale_base = rev + 7;
-        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=late_probe "
-                 "end=%s base=%u", end_tok, stale_base);
+        stale_base = s_rev + 7;
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=late_probe end=%s "
+                 "base=%u nbase=%llu", end_tok, stale_base, s_nrev);
         CHECK(call_fails(cmd) && reply_has("err doc changed"),
               "a stale base=%u is refused", stale_base);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=late_probe end=%s "
+                 "base=%u nbase=%llu", end_tok, s_rev, s_nrev + 99);
+        CHECK(call_fails(cmd) && reply_has("nbase"),
+              "PM7: a stale nbase is refused even on a fresh document");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=late_probe end=%s",
+                 end_tok);
+        CHECK(call_fails(cmd) && reply_has("base=<rev> is required"),
+              "PM7: a missing base is an explicit error, not silently fresh");
         bridge("tags");
         CHECK(!reply_has("late_probe"),
-              "the refused write left no record behind");
+              "the refused writes left no record behind");
 
         // 10. A draft keeps publication closed until it is settled.
         if (body) {
             body = body_layer_with_cells();   // the undo may have swapped layers
             goxel.image->active_layer = body;
             select_layer(body);
-            bridge("tag kind=pivot id=draft_probe end=+Z group=probe");
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "tag kind=pivot id=draft_probe end=+Z "
+                     "group=probe base=%u nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
             CHECK(reply_has("status=draft"), "the probe draft exists");
             snprintf(cmd, sizeof(cmd), "navsave path=%s/navtest_save2.gox",
                      outdir && *outdir ? outdir : ".");
             CHECK(call_fails(cmd), "a draft blocks publication");
-            bridge("untag draft_probe");
+            read_revs();
+            snprintf(cmd, sizeof(cmd), "untag id=draft_probe base=%u "
+                     "nbase=%llu", s_rev, s_nrev);
+            bridge(cmd);
             CHECK(reply_has("removed"), "untag removed the draft");
         }
+    }
+
+    // 11. PM review #541 (2): a mirrored cell marker lands on the surviving
+    //     cell — the mirror's half-open span, not one voxel past it.
+    body = body_layer_with_cells();
+    if (body && body->volume) {
+        int bb[2][3], aabb[2][3], before[3], after[3];
+        float rmat[4][4];
+        goxel.image->active_layer = body;
+        select_layer(body);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=exhaust id=mirror_probe end=+X "
+                 "base=%u nbase=%llu", s_rev, s_nrev);
+        bridge(cmd);
+        if (parse_anchored_cell("mirror_probe", before)) {
+            volume_get_bbox(body->volume, bb, false);
+            aabb[0][0] = bb[0][0]; aabb[1][0] = bb[1][0] + 1;
+            aabb[0][1] = bb[0][1]; aabb[1][1] = bb[1][1] + 1;
+            aabb[0][2] = bb[0][2]; aabb[1][2] = bb[1][2] + 1;
+            memset(rmat, 0, sizeof(rmat));
+            rmat[0][0] = rmat[1][1] = rmat[2][2] = rmat[3][3] = 1.f;
+            rmat[0][0] = -1.f;
+            rmat[3][0] = (float)(aabb[0][0] + aabb[1][0] - 1);
+            volume_move(body->volume, rmat);
+            nav_move_mirror_layer(body, 0, aabb);
+            // The editor pushes one history entry at the end of the filter,
+            // so one undo takes the mirror back.
+            image_history_push(goxel.image);
+            bridge("tags");
+            if (parse_tag_pos("mirror_probe", pos1)) {
+                after[0] = (int)floorf(pos1[0] - 0.5f + 0.01f);
+                after[1] = (int)floorf(pos1[1] - 0.5f + 0.01f);
+                after[2] = (int)floorf(pos1[2] - 0.5f + 0.01f);
+            } else {
+                after[0] = after[1] = after[2] = 9999;
+            }
+            CHECK(after[0] == aabb[0][0] + aabb[1][0] - 1 - before[0] &&
+                  after[1] == before[1] && after[2] == before[2],
+                  "PM2: the mirrored marker sits on min+max-1-c (%d->%d on X)",
+                  before[0], after[0]);
+            body = body_layer_with_cells();
+            CHECK(body && volume_get_alpha_at(body->volume, NULL, after) != 0,
+                  "PM2: and that cell really holds the mirrored voxel");
+            bridge("undo");
+        }
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "untag id=mirror_probe base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
     }
 
     printf("nav test: all steps executed\n");

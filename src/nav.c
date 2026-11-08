@@ -209,9 +209,12 @@ static image_t *s_last_image;
 static char s_doc[512];
 static char s_open_doc[512];
 static uint64_t s_seq;
+static uint64_t s_navrev;     // PM review #541 (7): registry mutation token
 static int s_count;
 
 int nav_count(void) { return s_count; }
+
+uint64_t nav_revision(void) { return s_navrev; }
 
 nav_record_t *nav_records(void) { return s_records; }
 
@@ -230,7 +233,9 @@ static nav_record_t *nav_alloc(void)
     if (!r) return NULL;
     DL_APPEND(s_records, r);
     r->seq = ++s_seq;
+    r->fp_kind = -1;          // not a shape record until nav_tag says so
     s_count++;
+    s_navrev++;
     return r;
 }
 
@@ -240,6 +245,7 @@ void nav_remove(nav_record_t *rec)
     DL_DELETE(s_records, rec);
     free(rec);
     s_count--;
+    s_navrev++;
 }
 
 const char *nav_kind_name(int kind)
@@ -270,6 +276,7 @@ static void nav_reset(void)
     DL_FOREACH_SAFE(s_records, r, tmp) nav_remove(r);
     s_count = 0;
     s_seq = 0;
+    s_navrev++;
 }
 
 void nav_sidecar_path(const char *gox_path, char *buf, size_t buf_size)
@@ -330,39 +337,84 @@ layer_t *nav_layer(int id)
 
 static void nav_fail(nav_record_t *r, const char *reason)
 {
-    if (r->status == NAV_STATUS_DRAFT) return;
+    // PM review #541 follow-up: an invalidated draft is flagged too — an
+    // orphaned draft must not sit invisible in the registry.
     if (r->status == NAV_STATUS_REVIEW && !strcmp(r->reason, reason)) return;
     r->status = NAV_STATUS_REVIEW;
     snprintf(r->reason, sizeof(r->reason), "%s", reason);
 }
 
+// PM review #541 (1,5): the Z plane the end cap is actually centred on.  The
+// generated surface measures from the anchor plane (surf_frame in slope.c):
+// a closed barrel or ellipsoid is centred on `centre`, an open section sits
+// on its base plane.  The region mid-plane is only right for a Mid anchor.
+static float slope_cap_z(const slope_mod_t *m)
+{
+    const float floor_p = (float)m->aabb[0][2];
+    const float ceil_p = (float)m->aabb[1][2] + 1.f;
+
+    if (m->closed && (m->kind == SLOPE_KIND_CYLINDER ||
+                      m->kind == SLOPE_KIND_SPHERE)) {
+        switch (m->anchor) {
+        case SLOPE_ANCHOR_CEIL: return ceil_p - m->rise;
+        case SLOPE_ANCHOR_MID:  return (floor_p + ceil_p) * 0.5f;
+        default:                return floor_p + m->rise;
+        }
+    }
+    switch (m->anchor) {
+    case SLOPE_ANCHOR_CEIL: return ceil_p;
+    case SLOPE_ANCHOR_MID:  return (floor_p + ceil_p) * 0.5f - m->rise * 0.5f;
+    default:                return floor_p;
+    }
+}
+
 // The world-space meaning of a record right now; either output may be NULL.
-bool nav_ring(const nav_record_t *rec, float out_pos[3], float out_dir[3])
+bool nav_shape_end(const nav_record_t *rec, int sign, float out_pos[3],
+                   float out_dir[3])
 {
     layer_t *l;
     const slope_mod_t *m;
     float u[3];
-    int a, i;
+    int a, i, phys;
 
     if (!rec) return false;
     l = nav_layer(rec->layer_id);
     if (!l) return false;
-    if (rec->at == NAV_AT_SHAPE_END) {
-        m = l->slope;
-        if (!m) return false;
-        nav_dir_vec(m->dir, u);
-        a = (m->dir == SLOPE_DIR_PX || m->dir == SLOPE_DIR_NX) ? 0 : 1;
-        if (out_pos)
-            for (i = 0; i < 3; i++)
-                out_pos[i] = (i == a)
-                    ? (rec->shape_sign > 0 ? (float)m->aabb[1][i] + 1.f
-                                           : (float)m->aabb[0][i])
-                    : (m->aabb[0][i] + m->aabb[1][i] + 1.f) / 2.f;
-        if (out_dir)
-            vec3_set(out_dir, u[0] * rec->shape_sign, u[1] * rec->shape_sign,
-                     u[2] * rec->shape_sign);
-        return true;
-    }
+    if (rec->at != NAV_AT_SHAPE_END) return false;
+    m = l->slope;
+    if (!m) return false;
+    nav_dir_vec(m->dir, u);
+    a = (m->dir == SLOPE_DIR_PX || m->dir == SLOPE_DIR_NX) ? 0 : 1;
+    // PM review #541 (1): shape_sign is relative to the signed axis, so
+    // the physical face is the max-coordinate one only when the signed
+    // axis points at it.  On an authored NX/NY shape the axis points at
+    // the min face, and the marker has to follow the axis, not the sign.
+    phys = (u[a] * (float)sign > 0.f) ? 1 : -1;
+    if (out_pos)
+        for (i = 0; i < 3; i++) {
+            if (i == a)
+                out_pos[i] = phys > 0 ? (float)m->aabb[1][i] + 1.f
+                                      : (float)m->aabb[0][i];
+            else if (i == 2)
+                out_pos[i] = slope_cap_z(m);
+            else
+                out_pos[i] = (m->aabb[0][i] + m->aabb[1][i] + 1.f) / 2.f;
+        }
+    if (out_dir)
+        vec3_set(out_dir, u[0] * sign, u[1] * sign, u[2] * sign);
+    return true;
+}
+
+bool nav_ring(const nav_record_t *rec, float out_pos[3], float out_dir[3])
+{
+    layer_t *l;
+    int i;
+
+    if (!rec) return false;
+    if (rec->at == NAV_AT_SHAPE_END)
+        return nav_shape_end(rec, rec->shape_sign, out_pos, out_dir);
+    l = nav_layer(rec->layer_id);
+    if (!l) return false;
     if (!l->volume) return false;
     if (volume_get_alpha_at(l->volume, NULL, rec->cell) == 0) return false;
     if (out_pos)
@@ -373,31 +425,63 @@ bool nav_ring(const nav_record_t *rec, float out_pos[3], float out_dir[3])
 
 // #### Revalidation #######################################################
 
+// PM review #541 (3,4): one record's meaning against the live geometry.
+// Returns true when the current authored geometry still supports what the
+// record says; `why` explains the first failure.  Revalidation and the
+// confirm/publication gates share this single authority.
+static bool nav_record_valid(const nav_record_t *r, char *why, size_t why_size)
+{
+    layer_t *l = nav_layer(r->layer_id);
+    const slope_mod_t *m;
+    int i, ext[3];
+
+    if (why && why_size) why[0] = 0;
+    if (!l) { snprintf(why, why_size, "owning layer removed"); return false; }
+    if (r->at == NAV_AT_SHAPE_END) {
+        m = l->slope;
+        if (!m) { snprintf(why, why_size, "the surface modifier is gone"); return false; }
+        if (m->stale) {
+            snprintf(why, why_size, "source cells changed under the surface");
+            return false;
+        }
+        if (m->closed != 1) { snprintf(why, why_size, "the end cap is open"); return false; }
+        if (!(m->rise > 0.f && m->rise <= 1.f)) {
+            snprintf(why, why_size, "the surface shape degenerated");
+            return false;
+        }
+        // PM review #541 (4): the semantic attachment.  A rigid move keeps
+        // kind, run axis, caps, anchor, rise and region size; re-authoring
+        // any of them means a different physical muzzle, so the record has
+        // to be re-anchored, not silently kept green.  A sidecar written
+        // before this fingerprint (fp_kind < 0 after adopt) cannot be
+        // compared and is left to the other checks.
+        if (r->fp_kind >= 0) {
+            for (i = 0; i < 3; i++) ext[i] = m->aabb[1][i] - m->aabb[0][i] + 1;
+            if (m->kind != r->fp_kind || m->dir != r->fp_dir ||
+                m->closed != r->fp_closed || m->anchor != r->fp_anchor ||
+                fabsf(m->rise - r->fp_rise) > 1e-4f ||
+                ext[0] != r->fp_ext[0] || ext[1] != r->fp_ext[1] ||
+                ext[2] != r->fp_ext[2]) {
+                snprintf(why, why_size, "the shape was re-authored");
+                return false;
+            }
+        }
+        return true;
+    }
+    if (!l->volume || volume_get_alpha_at(l->volume, NULL, r->cell) == 0) {
+        snprintf(why, why_size, "the anchor cell was removed");
+        return false;
+    }
+    return true;
+}
+
 void nav_revalidate(void)
 {
     nav_record_t *r;
-    layer_t *l;
-    const slope_mod_t *m;
+    char why[96];
 
     DL_FOREACH(s_records, r) {
-        l = nav_layer(r->layer_id);
-        if (!l) { nav_fail(r, "owning layer removed"); continue; }
-        if (r->at == NAV_AT_SHAPE_END) {
-            m = l->slope;
-            if (!m) { nav_fail(r, "the surface modifier is gone"); continue; }
-            if (m->stale)
-                nav_fail(r, "source cells changed under the surface");
-            if (m->closed != 1)
-                nav_fail(r, "the end cap is open");
-            if (!(m->rise > 0.f && m->rise <= 1.f))
-                nav_fail(r, "the surface shape degenerated");
-        } else {
-            if (!l->volume ||
-                volume_get_alpha_at(l->volume, NULL, r->cell) == 0) {
-                nav_fail(r, "the anchor cell was removed");
-                continue;
-            }
-        }
+        if (!nav_record_valid(r, why, sizeof(why))) nav_fail(r, why);
     }
 }
 
@@ -516,11 +600,28 @@ void nav_move_mirror_layer(layer_t *layer, int axis, const int aabb[2][3])
 
     if (!layer) return;
     DL_FOREACH(s_records, r) {
-        if (r->layer_id != layer->id || r->at != NAV_AT_CELL) continue;
+        if (r->layer_id != layer->id) continue;
         if (s_replay_in_flight && !r->_moving) continue;
+        if (r->at != NAV_AT_CELL) {
+            // PM review #541 (4): slope_move_surface has already turned the
+            // modifier's signed axis with the surface.  When that is exactly
+            // the flip this mirror implies, keep the fingerprint in step so
+            // a legitimate mirror is not mistaken for a re-author; anything
+            // else is left for revalidation to flag.
+            if (layer->slope && r->fp_kind >= 0) {
+                int run = (layer->slope->dir == SLOPE_DIR_PX ||
+                           layer->slope->dir == SLOPE_DIR_NX) ? 0 : 1;
+                if (run == axis && layer->slope->dir == (r->fp_dir ^ 1))
+                    r->fp_dir = layer->slope->dir;
+            }
+            continue;
+        }
+        // PM review #541 (2): volume_mirror reflects voxel c inside the
+        // half-open span [aabb[0], aabb[1]) to aabb[0]+aabb[1]-1-c; the
+        // marker has to land on the surviving cell, not one past it.
         c0 = r->cell[axis];
-        if (c0 < aabb[0][axis] || c0 > aabb[1][axis]) continue;
-        c1 = aabb[0][axis] + aabb[1][axis] - c0;
+        if (c0 < aabb[0][axis] || c0 >= aabb[1][axis]) continue;
+        c1 = aabb[0][axis] + aabb[1][axis] - 1 - c0;
         r->cell[axis] = c1;
         r->cell0[axis] = c1;
         r->dir[axis] = -r->dir[axis];
@@ -582,6 +683,8 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
     r->layer_id = l->id;
     r->status = NAV_STATUS_DRAFT;
     r->reason[0] = 0;
+    r->pin_mismatch = false;
+    r->fp_kind = -1;          // a cell record carries no shape fingerprint
     r->seq = ++s_seq;
 
     if (at == NAV_AT_SHAPE_END) {
@@ -594,17 +697,29 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
             FAIL("axis token is not parallel to this shape");
         r->shape_sign = sign;
         for (i = 0; i < 3; i++) r->cell[i] = 0;
+        // PM review #541 (4): capture the semantic attachment of this very
+        // modifier so a later re-authoring cannot hide behind a green mark.
+        r->fp_kind = l->slope->kind;
+        r->fp_dir = l->slope->dir;
+        r->fp_closed = l->slope->closed;
+        r->fp_anchor = l->slope->anchor;
+        r->fp_rise = l->slope->rise;
+        for (i = 0; i < 3; i++)
+            r->fp_ext[i] = l->slope->aabb[1][i] - l->slope->aabb[0][i] + 1;
     } else {
         // The anchor cell: the centre of the committed selection, literally
         // the cell the Owner pointed at (the selection includes its faces).
         int center[3];
         for (i = 0; i < 3; i++)
             center[i] = (int)floorf((aabb[0][i] + aabb[1][i] + 1.f) / 2.f);
-        for (i = 0; i < 3; i++) r->cell[i] = center[i];
-        // A concave selection can have an empty centre: anchor on the nearest
-        // cell the layer actually occupies inside the selection instead, so
-        // the marker sits on real geometry from the first draft.
-        if (!volume_get_alpha_at(l->volume, NULL, r->cell)) {
+        // PM review #541 (8): the centre only counts when it is inside the
+        // selection itself — an irregular or disconnected selection must not
+        // anchor its marker on a cell nobody selected.
+        if (volume_get_alpha_at(goxel.image->selection_mask, NULL, center)) {
+            for (i = 0; i < 3; i++) r->cell[i] = center[i];
+        }
+        if (!volume_get_alpha_at(goxel.image->selection_mask, NULL, r->cell) ||
+            !volume_get_alpha_at(l->volume, NULL, r->cell)) {
             volume_iterator_t sit;
             int sp[3];
             uint8_t sc[4];
@@ -642,6 +757,7 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
         if (!nav_ring(r, NULL, NULL))
             FAIL("anchor cell is empty on layer '%s'", l->name);
     }
+    s_navrev++;               // the registry moved, even onto an old draft id
     *err = 0;
     return r;
 #undef FAIL
@@ -649,13 +765,30 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
 
 bool nav_confirm(nav_record_t *rec, char *err, size_t err_size)
 {
+    char why[96];
+
     if (!rec) { snprintf(err, err_size, "no such record"); return false; }
-    if (!nav_ring(rec, NULL, NULL)) {
-        snprintf(err, err_size, "record '%s' has no geometry to pin", rec->id);
+    // PM review #541 (3): Confirm is a publication gate, not a button that
+    // blesses whatever is on screen.  The current authored geometry has to
+    // support the meaning right now; a meaning that was invalidated needs a
+    // deliberate untag + tag re-anchor, never a second click.
+    if (!nav_record_valid(rec, why, sizeof(why))) {
+        snprintf(err, err_size, "record '%s' cannot be confirmed: %s; "
+                 "untag and tag again to re-anchor", rec->id, why);
         return false;
     }
+    if (rec->status == NAV_STATUS_REVIEW && !rec->pin_mismatch) {
+        snprintf(err, err_size, "record '%s' changed meaning (%s): untag and "
+                 "tag again to re-anchor", rec->id, rec->reason);
+        return false;
+    }
+    // A pin_mismatch review is the document-level mismatch from adopt: the
+    // Owner clicking Confirm here is the explicit acceptance of the changed
+    // gox, so it clears — the geometry itself just validated clean.
     rec->status = NAV_STATUS_CONFIRMED;
     rec->reason[0] = 0;
+    rec->pin_mismatch = false;
+    s_navrev++;
     if (rec->at == NAV_AT_CELL) {
         memcpy(rec->cell0, rec->cell, sizeof(rec->cell0));
         vec3_copy(rec->dir, rec->dir0);
@@ -664,6 +797,86 @@ bool nav_confirm(nav_record_t *rec, char *err, size_t err_size)
 }
 
 // #### Sidecar JSON: the small grammar we write ourselves #################
+
+// PM review #541 (5): strings are written as proper JSON.  A Windows path
+// carries backslashes, so raw insertion produced a malformed file; escaping
+// is mandatory for every string, and the reader has to undo it.
+static void json_escape(const char *in, char *out, size_t size)
+{
+    size_t n = 0;
+    unsigned char c;
+
+    if (size) out[0] = 0;
+    for (; in && (c = (unsigned char)*in) != 0; in++) {
+        char tmp[8];
+        const char *add;
+        if (c == '"' || c == '\\') { tmp[0] = '\\'; tmp[1] = (char)c; tmp[2] = 0; add = tmp; }
+        else if (c == '\n') add = "\\n";
+        else if (c == '\r') add = "\\r";
+        else if (c == '\t') add = "\\t";
+        else if (c < 32) { snprintf(tmp, sizeof(tmp), "\\u%04x", c); add = tmp; }
+        else { tmp[0] = (char)c; tmp[1] = 0; add = tmp; }
+        if (n + strlen(add) + 1 > size) break;
+        while (*add) out[n++] = *add++;
+    }
+    out[n] = 0;
+}
+
+// Undo json_escape.  \uXXXX is encoded as UTF-8 (the sidecar is UTF-8).
+static void json_unescape(const char *in, char *out, size_t size)
+{
+    size_t n = 0;
+    char c;
+
+    if (size) out[0] = 0;
+    for (; (c = *in) != 0; in++) {
+        if (c != '\\') {
+            if (n + 2 > size) break;
+            out[n++] = c;
+            continue;
+        }
+        in++;
+        if (!*in) break;
+        switch (*in) {
+        case '"': case '\\': case '/': c = *in; break;
+        case 'n': c = '\n'; break;
+        case 'r': c = '\r'; break;
+        case 't': c = '\t'; break;
+        case 'b': c = '\b'; break;
+        case 'f': c = '\f'; break;
+        case 'u': {
+            unsigned int cp = 0;
+            int k;
+            for (k = 0; k < 4 && in[1 + k]; k++) {
+                char h = in[1 + k];
+                unsigned int d = (h >= '0' && h <= '9') ? (unsigned)(h - '0')
+                             : (h >= 'a' && h <= 'f') ? (unsigned)(h - 'a' + 10)
+                             : (h >= 'A' && h <= 'F') ? (unsigned)(h - 'A' + 10)
+                             : 0xFFFF;
+                if (d == 0xFFFF) { cp = 0; break; }
+                cp = cp * 16 + d;
+            }
+            if (cp == 0) { in += 4; continue; }
+            if (n + 4 > size) break;
+            if (cp < 0x80) out[n++] = (char)cp;
+            else if (cp < 0x800) {
+                out[n++] = (char)(0xC0 | (cp >> 6));
+                out[n++] = (char)(0x80 | (cp & 0x3F));
+            } else {
+                out[n++] = (char)(0xE0 | (cp >> 12));
+                out[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                out[n++] = (char)(0x80 | (cp & 0x3F));
+            }
+            in += 4;
+            continue;
+        }
+        default: c = *in; break;
+        }
+        if (n + 2 > size) break;
+        out[n++] = c;
+    }
+    out[n] = 0;
+}
 
 static const char *json_after_key(const char *s, const char *key)
 {
@@ -683,13 +896,20 @@ static bool json_get_str(const char *s, const char *key,
                          char out[], size_t out_size)
 {
     const char *q = json_after_key(s, key);
+    char raw[1024];
     size_t n = 0;
+
     if (!q || *q != '"') return false;
     q++;
-    out[0] = 0;
-    while (*q && *q != '"' && n + 1 < out_size) out[n++] = *q++;
-    out[n] = 0;
-    return *q == '"';
+    raw[0] = 0;
+    while (*q && *q != '"' && n + 1 < sizeof(raw)) {
+        if (*q == '\\' && q[1]) { raw[n++] = *q++; raw[n++] = *q++; }
+        else raw[n++] = *q++;
+    }
+    raw[n] = 0;
+    if (*q != '"') return false;
+    json_unescape(raw, out, out_size);
+    return true;
 }
 
 static bool json_get_int(const char *s, const char *key, int *out)
@@ -731,14 +951,30 @@ static int parse_kind(const char *name)
     return -1;
 }
 
+static bool json_get_float(const char *s, const char *key, float *out)
+{
+    const char *q = json_after_key(s, key);
+    char *end;
+    if (!q) return false;
+    *out = (float)strtod(q, &end);
+    return end != q;
+}
+
 // Adopt a sidecar next to `gox_path` after verifying that pin.
+//
+// PM review #541 (5,6, follow-up): the whole sidecar is validated into a
+// temporary registry first — a malformed, duplicated or truncated file is
+// rejected as a unit and cannot partially overwrite the working registry.
+// A pin mismatch no longer discards the records: they are adopted as
+// needs_review with pin_mismatch, so the Owner sees what the ship used to
+// mean and decides, while publication stays closed until then.
 int nav_adopt(const char *gox_path)
 {
     char sidecar[600];
     char text[16 * 1024];
-    char val[256], kind[24], at[16], status[24];
+    char val[1024], kind[24], at[16], status[24];
     uint8_t sha[32];
-    char hex[65], pin[65];
+    char hex[65];
     FILE *f;
     size_t n;
     const char *p;
@@ -758,7 +994,7 @@ int nav_adopt(const char *gox_path)
         return -1;
     }
 
-    pin[0] = 0;
+    val[0] = 0;
     if (!nav_sha256_file(gox_path, sha)) {
         nav_sha256_hex(sha, hex);
         if (!json_get_str(text, "source_sha256", val, sizeof(val)) ||
@@ -792,68 +1028,111 @@ int nav_adopt(const char *gox_path)
     }
     if (!aend) { printf("nav: sidecar records never close\n"); fflush(stdout); return -1; }
 
-    nav_reset();
-    brace = p + 1;
-    while ((brace = strchr(brace, '{')) && brace < aend) {
-        char *bend = strchr(brace, '}');
-        nav_record_t *r;
-        int kindv, signv;
+    // Parse into a temporary list; commit only when every record parsed.
+    {
+        nav_record_t *tmp_head = NULL, *r, *tmp, *other;
+        int nrec = 0;
+        bool bad = false;
 
-        if (!bend) break;
-        r = nav_alloc();
-        if (!r) return -1;
-        *bend = 0;    // local scanning convenience restored below
-        if (!json_get_str(brace, "id", val, sizeof(val)) || !val[0])
-            snprintf(val, sizeof(val), "");
-        snprintf(r->id, sizeof(r->id), "%s", val);
-        json_get_str(brace, "group", val, sizeof(val));
-        snprintf(r->group, sizeof(r->group), "%s", val);
-        json_get_str(brace, "label", val, sizeof(val));
-        snprintf(r->label, sizeof(r->label), "%s", val);
-        json_get_int(brace, "layer_id", &r->layer_id);
-        r->status = NAV_STATUS_REVIEW;
-        snprintf(r->reason, sizeof(r->reason), "%s",
-                 pin_ok ? "not a known record kind" :
-                 "the sidecar does not pin this gox");
-        kindv = json_get_str(brace, "kind", kind, sizeof(kind))
-                    ? parse_kind(kind) : -1;
-        if (!json_get_str(brace, "at", at, sizeof(at)))
-            snprintf(at, sizeof(at), "");
-        if (!json_get_str(brace, "status", status, sizeof(status)))
-            snprintf(status, sizeof(status), "");
-        *bend = '}';
+        brace = p + 1;
+        while (!bad && (brace = strchr(brace, '{')) && brace < aend) {
+            char *bend = strchr(brace, '}');
+            int kindv, signv = 0, iv;
+            float cell[3] = {0, 0, 0}, dir[3] = {0, 0, 0}, fdir[3];
+            bool have_cell = false, have_dir = false, have_sign = false;
 
-        if (pin_ok && kindv >= 0 && !strcmp(status, "confirmed")) {
-            if (!strcmp(at, "shape_end")) {
-                signv = 0;
-                json_get_int(brace, "shape_sign", &signv);
-                if (signv == 1 || signv == -1) {
+            if (!bend || bend > aend) { bad = true; break; }
+            r = calloc(1, sizeof(*r));
+            if (!r) { bad = true; break; }
+            r->seq = ++s_seq;
+            r->fp_kind = -1;
+            DL_APPEND(tmp_head, r);
+            nrec++;
+
+            *bend = 0;        // every read below stays inside this record
+            if (!json_get_str(brace, "id", val, sizeof(val)) || !val[0])
+                bad = true;
+            snprintf(r->id, sizeof(r->id), "%s", val);
+            DL_FOREACH(tmp_head, other) {
+                if (other != r && !strcmp(other->id, r->id)) bad = true;
+            }
+            if (json_get_str(brace, "group", val, sizeof(val)))
+                snprintf(r->group, sizeof(r->group), "%s", val);
+            if (json_get_str(brace, "label", val, sizeof(val)))
+                snprintf(r->label, sizeof(r->label), "%s", val);
+            json_get_int(brace, "layer_id", &r->layer_id);
+            kindv = json_get_str(brace, "kind", kind, sizeof(kind))
+                        ? parse_kind(kind) : -1;
+            if (!json_get_str(brace, "at", at, sizeof(at)))
+                snprintf(at, sizeof(at), "");
+            if (!json_get_str(brace, "status", status, sizeof(status)))
+                snprintf(status, sizeof(status), "");
+            have_sign = json_get_int(brace, "shape_sign", &signv);
+            have_cell = json_get_vec(brace, "cell", cell);
+            have_dir = json_get_vec(brace, "dir", dir);
+            // PM review #541 (4): the fingerprint travels with the record.
+            if (json_get_int(brace, "fp_kind", &iv) && iv >= 0) {
+                r->fp_kind = iv;
+                json_get_int(brace, "fp_dir", &r->fp_dir);
+                json_get_int(brace, "fp_closed", &r->fp_closed);
+                json_get_int(brace, "fp_anchor", &r->fp_anchor);
+                json_get_float(brace, "fp_rise", &r->fp_rise);
+                if (json_get_vec(brace, "fp_ext", fdir))
+                    for (iv = 0; iv < 3; iv++)
+                        r->fp_ext[iv] = (int)floorf(fdir[iv] + 0.5f);
+            }
+            *bend = '}';
+            if (bad) break;
+
+            r->status = NAV_STATUS_REVIEW;
+            r->pin_mismatch = !pin_ok;
+            snprintf(r->reason, sizeof(r->reason), "%s",
+                     pin_ok ? "not a known record kind" :
+                     "the sidecar does not pin this gox");
+
+            // The record's data is restored faithfully whatever the pin
+            // says — pin_ok only decides the status.  A pin-mismatch record
+            // must still know it is a cell record, or the Owner's explicit
+            // Confirm would judge it against the wrong geometry.
+            {
+                bool data_ok = false;
+                if (kindv >= 0) {
                     r->kind = kindv;
-                    r->at = NAV_AT_SHAPE_END;
-                    r->shape_sign = signv;
-                    r->status = NAV_STATUS_CONFIRMED;
-                    r->reason[0] = 0;
-                    count++;
-                }
-            } else if (!strcmp(at, "cell")) {
-                float cell[3] = {0, 0, 0}, dir[3] = {0, 0, 0};
-                int i;
-                if (json_get_vec(brace, "cell", cell) &&
-                    json_get_vec(brace, "dir", dir))
-                {
-                    r->kind = kindv;
-                    r->at = NAV_AT_CELL;
-                    for (i = 0; i < 3; i++) {
-                        r->cell[i] = r->cell0[i] = (int)floorf(cell[i]);
-                        r->dir[i] = r->dir0[i] = dir[i];
+                    if (!strcmp(at, "shape_end") && have_sign &&
+                        (signv == 1 || signv == -1)) {
+                        r->at = NAV_AT_SHAPE_END;
+                        r->shape_sign = signv;
+                        data_ok = true;
+                    } else if (!strcmp(at, "cell") && have_cell && have_dir) {
+                        int i;
+                        r->at = NAV_AT_CELL;
+                        for (i = 0; i < 3; i++) {
+                            r->cell[i] = r->cell0[i] = (int)floorf(cell[i]);
+                            r->dir[i] = r->dir0[i] = dir[i];
+                        }
+                        data_ok = true;
                     }
+                }
+                if (data_ok && pin_ok && !strcmp(status, "confirmed")) {
                     r->status = NAV_STATUS_CONFIRMED;
                     r->reason[0] = 0;
                     count++;
                 }
             }
+            brace = bend + 1;
         }
-        brace = bend + 1;
+
+        if (bad) {
+            DL_FOREACH_SAFE(tmp_head, r, tmp) { DL_DELETE(tmp_head, r); free(r); }
+            printf("nav: sidecar rejected, the working registry is untouched\n");
+            fflush(stdout);
+            return -1;
+        }
+        // Commit: the old registry goes, the validated one moves in.
+        DL_FOREACH_SAFE(s_records, r, tmp) { DL_DELETE(s_records, r); free(r); }
+        s_records = tmp_head;
+        s_count = nrec;
+        s_navrev++;
     }
     nav_revalidate();
     snprintf(s_doc, sizeof(s_doc), "%s", gox_path);
@@ -868,6 +1147,7 @@ int nav_save(const char *path, char *err, size_t err_size)
     uint8_t sha[32];
     char hex[65];
     char sidecar[600], tmp[640], base[256];
+    char esc[1024], esc2[1024], esc3[2048], esc4[1024];
     FILE *f;
     int rc, total = 0, i = 0;
 
@@ -875,6 +1155,9 @@ int nav_save(const char *path, char *err, size_t err_size)
 
     if (!goxel.image) FAILS("no document");
     if (slope_session_is_open()) FAILS("a shape session is open");
+    // PM review #541 (3): publication revalidates synchronously — a record
+    // that went stale since the last frame cannot slip through into a pin.
+    nav_revalidate();
     DL_FOREACH(s_records, r) {
         total++;
         if (r->status != NAV_STATUS_CONFIRMED)
@@ -893,26 +1176,42 @@ int nav_save(const char *path, char *err, size_t err_size)
     f = fopen(tmp, "wb");
     if (!f) FAILS("cannot write %s", tmp);
 
+    // PM review #541 (5): every string is JSON-escaped; a Windows path with
+    // backslashes or spaces publishes as valid JSON, not a broken file.
     nav_basename(path, base, sizeof(base));
+    json_escape(base, esc, sizeof(esc));
+    json_escape(path, esc3, sizeof(esc3));
     fprintf(f,
         "{\n \"format\": \"amfm.nav\",\n \"schema_version\": 1,\n"
         " \"asset_id\": \"%s\",\n \"source_gox\": \"%s\",\n"
         " \"source_sha256\": \"%s\",\n \"doc_key\": %u,\n"
         " \"records\": [\n",
-        base, path, hex, (unsigned)image_get_key(goxel.image));
+        esc, esc3, hex, (unsigned)image_get_key(goxel.image));
     DL_FOREACH(s_records, r) {
+        json_escape(r->id, esc, sizeof(esc));
+        json_escape(r->group, esc2, sizeof(esc2));
+        json_escape(r->label, esc4, sizeof(esc4));
         fprintf(f,
             "  {\"id\": \"%s\", \"group\": \"%s\", \"label\": \"%s\",\n"
             "   \"kind\": \"%s\", \"at\": \"%s\", \"layer_id\": %d,\n",
-            r->id, r->group, r->label, nav_kind_name(r->kind),
+            esc, esc2, esc4, nav_kind_name(r->kind),
             r->at == NAV_AT_SHAPE_END ? "shape_end" : "cell", r->layer_id);
-        if (r->at == NAV_AT_SHAPE_END)
+        if (r->at == NAV_AT_SHAPE_END) {
             fprintf(f, "   \"shape_sign\": %d,\n", r->shape_sign);
-        else
+            // PM review #541 (4): the semantic attachment travels with the
+            // record, so a reopen can tell a rigid move from a re-authoring.
+            fprintf(f,
+                "   \"fp_kind\": %d, \"fp_dir\": %d, \"fp_closed\": %d,\n"
+                "   \"fp_anchor\": %d, \"fp_rise\": %.6f,"
+                " \"fp_ext\": [%d, %d, %d],\n",
+                r->fp_kind, r->fp_dir, r->fp_closed, r->fp_anchor,
+                r->fp_rise, r->fp_ext[0], r->fp_ext[1], r->fp_ext[2]);
+        } else {
             fprintf(f,
                 "   \"cell\": [%d, %d, %d],\n   \"dir\": [%.6f, %.6f, %.6f],\n",
                 r->cell[0], r->cell[1], r->cell[2],
                 r->dir[0], r->dir[1], r->dir[2]);
+        }
         fprintf(f, "   \"status\": \"confirmed\", \"seq\": %llu\n  }%s\n",
                 (unsigned long long)r->seq, (++i < total) ? "," : "");
     }
@@ -938,16 +1237,19 @@ void nav_notify_opened(const char *path)
 {
     if (!path || !*path) return;
     snprintf(s_doc, sizeof(s_doc), "%s", path);
+    // PM review #541 (6): an open action always re-settles the registry.
+    // load_from_file replaces the image contents in place, so neither the
+    // image pointer nor the path has to change when the Owner re-opens the
+    // same file — the guard alone would keep the previous session's records
+    // green over bytes that may no longer match the pin.
+    s_open_doc[0] = 0;
 }
 
 static void check_document_for(image_t *img)
 {
-    uint8_t sha[32];
-    char hex[65], pin[65], sidecar[600];
+    char sidecar[600];
     const char *doc = NULL;
     FILE *f;
-    size_t n;
-    char text[1024];
 
     if (!img) {
         if (s_last_image || s_doc[0] || nav_count()) {
@@ -970,23 +1272,20 @@ static void check_document_for(image_t *img)
     snprintf(s_open_doc, sizeof(s_open_doc), "%s", doc ? doc : "");
     if (doc && strcmp(doc, "-")) snprintf(s_doc, sizeof(s_doc), "%s", doc);
 
-    // A record file is adopted only when the opened gox is byte-identical to
-    // the one its pin sealed: a stale or foreign pair can never look fresh.
-    if (doc && strcmp(doc, "-") && !nav_sha256_file(doc, sha)) {
-        nav_sha256_hex(sha, hex);
+    // PM review #541 (6): a document with a sidecar always goes through the
+    // adopt path.  A matching pin yields the confirmed records; a mismatch
+    // keeps them as needs_review with the pin_mismatch flag, so a normal
+    // reopen surfaces the previous meaning for an explicit Owner decision
+    // instead of quietly clearing every equipment tag.  Only a document with
+    // no sidecar at all starts from an empty registry, and publication stays
+    // fail-closed either way (nav_save refuses while anything is in review).
+    if (doc && strcmp(doc, "-")) {
         nav_sidecar_path(doc, sidecar, sizeof(sidecar));
         f = fopen(sidecar, "rb");
         if (f) {
-            n = fread(text, 1, sizeof(text) - 1, f);
             fclose(f);
-            text[n] = 0;
-            pin[0] = 0;
-            if (json_get_str(text, "source_sha256", pin, sizeof(pin)) &&
-                !strcmp(pin, hex)) {
-                nav_reset();
-                nav_adopt(doc);
-                return;
-            }
+            nav_adopt(doc);
+            return;
         }
     }
     nav_reset();

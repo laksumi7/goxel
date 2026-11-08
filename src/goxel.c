@@ -1837,6 +1837,9 @@ static int unsaved_change_popup(void *data)
             goxel_reset();
         } else {
             load_from_file((const char *)data, true);
+            // AMFM #541: an open action re-settles the navigator registry,
+            // even when the same path is re-opened over itself.
+            nav_notify_opened((const char *)data);
         }
         ret = 1;
     }
@@ -1854,6 +1857,9 @@ void goxel_open_file(const char *path)
             goxel_reset();
         } else {
             load_from_file(path, true);
+            // AMFM #541: an open action re-settles the navigator registry,
+            // even when the same path is re-opened over itself.
+            nav_notify_opened(path);
         }
         return;
     }

@@ -167,8 +167,11 @@ static void cmd_state(void)
         return;
     }
     // AMFM #541: the document revision a worker carries in `base=` on every
-    // mutating verb; it changes whenever the image changes at all.
-    out_fmt("rev %u\ntags %d\n", doc_rev(), nav_count());
+    // mutating verb; it changes whenever the image changes at all.  The
+    // registry revision (PM review #541 (7)) rides along as `nbase=`: it
+    // moves on every semantic write, which the document revision cannot see.
+    out_fmt("rev %u\nnavrev %llu\ntags %d\n", doc_rev(),
+            (unsigned long long)nav_revision(), nav_count());
     out_fmt("painter_mode %d\n", goxel.painter.mode);
     if (img->active_layer)
         out_fmt("active '%s' lid=%d shape=%d cells=%d\n",
@@ -309,6 +312,8 @@ static void cmd_shape(const char *args)
 // #### AMFM #541: the navigator verbs #####################################
 
 // A value of a space-separated KEY=VALUE list; longest match wins.
+// PM review #541 (5): a quoted value may contain spaces — the Star Marine
+// Trooper art directory does — so `path="C:\some dir\pd.gox"` survives.
 static bool opt_get(const char *args, const char *key, char out[], size_t size)
 {
     char pat[40];
@@ -330,6 +335,12 @@ static bool opt_get(const char *args, const char *key, char out[], size_t size)
     }
     if (!p) return false;
     p += strlen(pat);
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"' && n + 1 < size) out[n++] = *p++;
+        out[n] = 0;
+        return *p == '"';
+    }
     while (*p && *p != ' ' && *p != '\t' && n + 1 < size) out[n++] = *p++;
     out[n] = 0;
     return true;
@@ -371,6 +382,34 @@ static bool rev_check(const char *args, uint32_t *rev_output)
     out_fmt("err doc changed since base %u (now rev %u): re-read state\n",
             base, rev);
     return false;
+}
+
+// PM review #541 (7): the revision contract for worker semantic writes
+// (tag, confirm, untag).  A write must carry both the document revision it
+// read (base=) and the registry revision (nbase=): the document hash cannot
+// see the registry, so without nbase a second worker's tag or confirm would
+// be invisible and silently overwritten.  A missing token is an explicit
+// error, never silently treated as fresh.  The GUI confirms against the
+// current state directly and does not go through this path.
+static bool sem_guards(const char *args)
+{
+    char vb[32], vn[32];
+
+    if (!opt_get(args, "base", vb, sizeof(vb))) {
+        out_add("err base=<rev> is required; read it from 'state'\n");
+        return false;
+    }
+    if (!rev_check(args, NULL)) return false;
+    if (!opt_get(args, "nbase", vn, sizeof(vn))) {
+        out_add("err nbase=<navrev> is required; read it from 'state'\n");
+        return false;
+    }
+    if (strtoull(vn, NULL, 10) != nav_revision()) {
+        out_fmt("err registry changed since nbase %s (now %llu): re-read state\n",
+                vn, (unsigned long long)nav_revision());
+        return false;
+    }
+    return true;
 }
 
 // The exact confirmed cells of the selection, grouped by the layer they sit
@@ -417,24 +456,43 @@ static void cmd_selinfo(void)
         m = l->slope;
         if (!l->volume) continue;
         {
-            float u[3], pa[3], pb[3];
-            int a;
-            nav_dir_vec(m->dir, u);
+            nav_record_t probe;
+            float pa[3], pb[3], da[3], db[3];
+            int a, hits = 0;
+            volume_iterator_t siter;
+            uint8_t sc[4];
+            int sp[3];
+
+            memset(&probe, 0, sizeof(probe));
+            probe.layer_id = l->id;
+            probe.at = NAV_AT_SHAPE_END;
+            // PM review #541 (1): the two candidate faces come from the same
+            // authority that places the marker, negative axes included.
+            nav_shape_end(&probe, +1, pa, da);
+            nav_shape_end(&probe, -1, pb, db);
             a = (m->dir == SLOPE_DIR_PX || m->dir == SLOPE_DIR_NX) ? 0 : 1;
-            pa[a] = (float)m->aabb[0][a];
-            pb[a] = (float)m->aabb[1][a] + 1.f;
-            pa[(a + 1) % 3] = pb[(a + 1) % 3] =
-                (m->aabb[0][(a + 1) % 3] + m->aabb[1][(a + 1) % 3] + 1.f) / 2.f;
-            pa[(a + 2) % 3] = pb[(a + 2) % 3] =
-                (m->aabb[0][(a + 2) % 3] + m->aabb[1][(a + 2) % 3] + 1.f) / 2.f;
-            out_fmt("shape layer=%d name='%s' kind=%s run=%+d closed=%d "
-                    "rise=%.3f aabb=%d,%d,%d..%d,%d,%d rev=%u stale=%d\n",
-                    l->id, l->name, slope_kind_name(m->kind),
+            // PM review #541 (8): say which shape is the selected target and
+            // which is only document inventory.
+            if (goxel.image->selection_mask) {
+                siter = volume_get_iterator(goxel.image->selection_mask,
+                                            VOLUME_ITER_VOXELS |
+                                            VOLUME_ITER_SKIP_EMPTY);
+                while (volume_iter(&siter, sp)) {
+                    volume_get_at(goxel.image->selection_mask, &siter, sp, sc);
+                    if (sc[3] && volume_get_alpha_at(l->volume, NULL, sp))
+                        hits++;
+                }
+            }
+            out_fmt("shape layer=%d name='%s' kind=%s axis=%c run=%+d closed=%d "
+                    "rise=%.3f aabb=%d,%d,%d..%d,%d,%d rev=%u stale=%d sel=%d%s\n",
+                    l->id, l->name, slope_kind_name(m->kind), 'x' + a,
                     (m->dir == SLOPE_DIR_PX || m->dir == SLOPE_DIR_PY) ? +1 : -1,
                     m->closed, m->rise,
                     m->aabb[0][0], m->aabb[0][1], m->aabb[0][2],
                     m->aabb[1][0], m->aabb[1][1], m->aabb[1][2],
-                    m->revision, m->stale);
+                    m->revision, m->stale,
+                    (l == goxel.image->active_layer || hits > 0) ? 1 : 0,
+                    l == goxel.image->active_layer ? " ACTIVE" : "");
             out_fmt("ends layer=%d a %0.2f %0.2f %0.2f b %0.2f %0.2f %0.2f\n",
                     l->id, pa[0], pa[1], pa[2], pb[0], pb[1], pb[2]);
         }
@@ -472,7 +530,7 @@ static void cmd_tag(const char *args)
     nav_record_t *r;
     layer_t *l;
 
-    if (!rev_check(args, NULL)) return;
+    if (!sem_guards(args)) return;
     if (!opt_get(args, "kind", kindname, sizeof(kindname))) {
         out_add("err usage: tag kind=muzzle|exhaust|pivot|hinge end=+Y "
                 "id=<name> [source=layer] [group=..] [label=..]\n");
@@ -527,24 +585,27 @@ static void cmd_tag(const char *args)
     if (!r) { out_fmt("err %s\n", token_err); return; }
 
     // Report both geometric ends, and what the token resolved to, so the
-    // owner's question "+Y?" is answered for both eyes at once.
+    // owner's question "+Y?" is answered for both eyes at once.  PM review
+    // #541 (1): both faces come from nav_shape_end — the exact authority
+    // that places the marker — so the reported position and direction are
+    // the real ones on any authored axis, negative included.
     if (r->at == NAV_AT_SHAPE_END) {
-        float u[3], pm[3], pp[3];
+        float pp[3], pd[3], po[3], od[3];
         const slope_mod_t *m = l->slope;
-        int a;
-        nav_dir_vec(m->dir, u);
-        a = (m->dir == SLOPE_DIR_PX || m->dir == SLOPE_DIR_NX) ? 0 : 1;
-        pm[a] = (float)m->aabb[0][a];
-        pp[a] = (float)m->aabb[1][a] + 1.f;
-        pm[(a + 1) % 3] = pp[(a + 1) % 3] =
-            (m->aabb[0][(a + 1) % 3] + m->aabb[1][(a + 1) % 3] + 1.f) / 2.f;
-        pm[(a + 2) % 3] = pp[(a + 2) % 3] =
-            (m->aabb[0][(a + 2) % 3] + m->aabb[1][(a + 2) % 3] + 1.f) / 2.f;
-        out_fmt("ends axis=%c sign=%+d endp picked %0.2f %0.2f %0.2f\n",
-                'x' + a, r->shape_sign, pp[0], pp[1], pp[2]);
-        out_fmt("ends axis=%c sign=%+d endp other %0.2f %0.2f %0.2f\n",
-                'x' + a, -r->shape_sign, pm[0], pm[1], pm[2]);
-        out_fmt("axisdir %0.2f %0.2f %0.2f\n", u[0], u[1], u[2]);
+        int a = (m->dir == SLOPE_DIR_PX || m->dir == SLOPE_DIR_NX) ? 0 : 1;
+        nav_shape_end(r, r->shape_sign, pp, pd);
+        nav_shape_end(r, -r->shape_sign, po, od);
+        out_fmt("ends axis=%c sign=%+d dir %0.2f %0.2f %0.2f picked %0.2f %0.2f %0.2f\n",
+                'x' + a, r->shape_sign, pd[0], pd[1], pd[2],
+                pp[0], pp[1], pp[2]);
+        out_fmt("ends axis=%c sign=%+d dir %0.2f %0.2f %0.2f other %0.2f %0.2f %0.2f\n",
+                'x' + a, -r->shape_sign, od[0], od[1], od[2],
+                po[0], po[1], po[2]);
+        {
+            float u[3];
+            nav_dir_vec(m->dir, u);
+            out_fmt("axisdir %0.2f %0.2f %0.2f\n", u[0], u[1], u[2]);
+        }
     }
     out_fmt("tag id=%s kind=%s at=%s layer=%d name='%s' group=%s "
             "status=draft\n", r->id, nav_kind_name(r->kind),
@@ -590,14 +651,28 @@ static void cmd_tags(void)
     out_fmt("tags %d\nok\n", n);
 }
 
-static void cmd_tag_alive(const char *id, bool confirm)
+// PM review #541 (7): confirm and untag are semantic writes too.  The id is
+// read as a token (a bare first word still works), and both revision tokens
+// are enforced — the old code handed the whole argument string to nav_find,
+// so appending base= would have broken the lookup instead of guarding it.
+static void cmd_tag_alive(const char *args, bool confirm)
 {
     nav_record_t *r;
-    char err[128];
+    char err[192];
+    char id[64] = "";
+    const char *p = args ? args : "";
 
-    if (!rev_check(NULL, NULL)) return;
+    if (!opt_get(p, "id", id, sizeof(id))) {
+        if (strncmp(p, "base=", 5) && strncmp(p, "nbase=", 6))
+            sscanf(p, "%63s", id);
+    }
+    if (!id[0]) {
+        out_add("err usage: confirm id=<id> base=<rev> nbase=<navrev>\n");
+        return;
+    }
+    if (!sem_guards(p)) return;
     r = nav_find(id);
-    if (!r) { out_fmt("err no record '%s'\n", id ? id : ""); return; }
+    if (!r) { out_fmt("err no record '%s'\n", id); return; }
     if (confirm) {
         if (!nav_confirm(r, err, sizeof(err))) {
             out_fmt("err %s\n", err);
@@ -690,10 +765,14 @@ static void handle_line(const char *line)
                 "shape x y z [rise] [name] | undo | redo\n"
                 "#541 navigator: selinfo | tag kind=muzzle|exhaust|pivot|hinge "
                 "end=+Y|-.. id=<id> [source=..] [group=..] [label=..] "
-                "[base=rev] | tags | confirm <id> | untag <id> | "
-                "navsave [path=..] [base=rev] | navadopt path=.. | help\n"
-                "every mutating verb accepts base=<rev>; when the document has\n"
-                "changed since the worker last read `state`, it is refused.\nok\n");
+                "base=rev nbase=navrev | tags | confirm id=<id> base=rev "
+                "nbase=navrev | untag id=<id> base=rev nbase=navrev | "
+                "navsave [path=\"..\"|path=..] [base=rev] | navadopt path=.. | help\n"
+                "geometry verbs accept base=<rev>; the semantic verbs (tag,\n"
+                "confirm, untag) require base=<rev> AND nbase=<navrev>, both\n"
+                "read from 'state' (rev / navrev lines); a stale or missing\n"
+                "token is refused.  A quoted path= value may contain spaces.\n"
+                "ok\n");
     } else {
         out_fmt("err unknown command '%s'\n", cmd);
     }

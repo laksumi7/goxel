@@ -74,6 +74,20 @@ typedef struct nav_record {
     int      status;
     char     reason[80];    // empty unless status == needs_review
     uint64_t seq;
+    // PM review #541 (4): the semantic attachment captured when the record
+    // was tagged.  A legitimate rigid move keeps every one of these; re-
+    // authoring the surface (kind, run axis, caps, anchor, rise, region
+    // size) changes at least one and forces a review instead of letting a
+    // green marker silently denote a different physical muzzle.
+    int      fp_kind;       // slope kind at tag time; -1 = not a shape record
+    int      fp_dir;        // signed run axis (SLOPE_DIR_*)
+    int      fp_closed;
+    int      fp_anchor;
+    float    fp_rise;
+    int      fp_ext[3];     // region extent per axis, inclusive cell counts
+    // PM review #541 (6): the sidecar did not pin the gox it was adopted
+    // with, but the records are kept for an explicit Owner decision.
+    bool     pin_mismatch;
     // Internal: this record's anchor is inside the mask of a transform in
     // flight (drag replay).
     bool     _moving;
@@ -91,15 +105,30 @@ nav_record_t *nav_find(const char *id);
 nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
                       const char *group, const char *label, char *err,
                       size_t err_size);
-// Accept the current geometry as the meaning (draft or needs_review ->
-// confirmed).  Returns false when the meaning cannot be computed right now.
+// Accept the current geometry as the meaning.  PM review #541 (3): this is a
+// publication gate, not a button — it validates the *current* authored
+// geometry and refuses a record whose meaning has been invalidated (those
+// need an explicit untag + tag re-anchor).  A record held in review only
+// because the sidecar did not pin the gox (pin_mismatch) may be confirmed:
+// that click is the Owner's explicit acceptance of the changed document.
 bool nav_confirm(nav_record_t *rec, char *err, size_t err_size);
 void nav_remove(nav_record_t *rec);
 const char *nav_kind_name(int kind);
 const char *nav_status_name(int status);
 
+// PM review #541 (7): the registry revision.  Bumped by every mutation of
+// the registry itself (tag, confirm, remove, adopt, reset), so a worker can
+// carry it as `nbase=` next to `base=` and cannot silently overwrite another
+// worker's semantic write even though the document revision did not move.
+uint64_t nav_revision(void);
+
 // The world-space meaning of a record right now; either output may be NULL.
 bool nav_ring(const nav_record_t *rec, float out_pos[3], float out_dir[3]);
+// The same, for a hypothetical shape_sign on the record: how the bridge
+// shows both candidate ends with exactly the authority that places the
+// marker (PM review #541 (1): position and direction must agree everywhere).
+bool nav_shape_end(const nav_record_t *rec, int sign, float out_pos[3],
+                   float out_dir[3]);
 
 // The owning layer of a record id, resolved by id.
 layer_t *nav_layer(int id);
@@ -115,8 +144,11 @@ void nav_check_document(void);
 void nav_revalidate(void);
 
 // Settle the registry for whatever document is currently open: adopt the
-// sidecar when the gox still matches its pin, reset otherwise.  The editor
-// calls this every frame; the headless self-test calls it at document swaps.
+// sidecar when there is one — a matching pin yields the confirmed records, a
+// mismatch keeps them as needs_review with the pin_mismatch flag (PM review
+// #541 (6): a mismatch is surfaced, never silently cleared).  Only a document
+// with no sidecar at all starts from an empty registry.  The editor calls
+// this every frame; the headless self-test calls it at document swaps.
 void nav_check_document(void);
 
 // Transform side hooks -------------------------------------------------------
