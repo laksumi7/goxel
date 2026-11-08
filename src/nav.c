@@ -1204,16 +1204,134 @@ static bool nav_gox_reads_ok(const char *path)
     return sz > 4;
 }
 
+// PM rev4 (P0-2): the GOX loader itself is not robust against a truncated
+// file (it logs and keeps going with garbage), so before trusting a
+// candidate to the loader, walk its chunk table: every chunk's declared
+// length must fit inside the file and the chunks must end exactly at EOF.
+// A chunk is type[4] + len[4] + data[len] + crc[4] (chunk_write_finish).
+// A truncated export fails here instead of reaching the loader.
+static bool nav_gox_chunks_ok(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    long sz, pos;
+    char type[4];
+    uint8_t b[4];
+    int32_t len;
+
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    sz = ftell(f);
+    if (sz < 8) {
+        fclose(f);
+        return false;
+    }
+    fseek(f, 8, SEEK_SET);              // magic + version
+    pos = 8;
+    while (pos < sz) {
+        if (fread(type, 1, 4, f) != 4 || fread(b, 1, 4, f) != 4) {
+            fclose(f);
+            return false;
+        }
+        len = (int32_t)((uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                        ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24));
+        pos += 12 + (long)len;          // header + data + CRC
+        if (len < 0 || pos > sz) {
+            fclose(f);
+            return false;
+        }
+        fseek(f, pos, SEEK_SET);
+    }
+    fclose(f);
+    return pos == sz;
+}
+
+// PM rev4 (P0-2): magic and size are not content.  The candidate is loaded
+// back into a throwaway image and must read as the same model: same layer
+// count and same occupied-cell count as the document being published.  The
+// swap is contained (single-threaded, one action), and the live image is
+// back in place before this returns.
+bool nav_gox_validate(const char *path, char *why, size_t why_size)
+{
+    image_t *saved = goxel.image, *tmp;
+    layer_t *l;
+    volume_iterator_t it;
+    uint8_t c[4];
+    int p[3];
+    int want_layers = 0, want_cells = 0, got_layers = 0, got_cells = 0;
+    bool ok = false;
+
+    if (!saved) {
+        snprintf(why, why_size, "no live document to compare against");
+        return false;
+    }
+    if (!nav_gox_chunks_ok(path)) {
+        snprintf(why, why_size, "the candidate gox is truncated or malformed");
+        return false;
+    }
+    DL_FOREACH(saved->layers, l) {
+        want_layers++;
+        if (!l->volume) continue;
+        it = volume_get_iterator(l->volume, VOLUME_ITER_VOXELS |
+                                                  VOLUME_ITER_SKIP_EMPTY);
+        while (volume_iter(&it, p)) {
+            volume_get_at(l->volume, &it, p, c);
+            if (c[3]) want_cells++;
+        }
+    }
+    goxel.image = tmp = image_new();
+    if (load_from_file(path, true) != 0) {
+        snprintf(why, why_size, "the candidate gox does not load back");
+    } else {
+        DL_FOREACH(tmp->layers, l) {
+            got_layers++;
+            if (!l->volume) continue;
+            it = volume_get_iterator(l->volume, VOLUME_ITER_VOXELS |
+                                                      VOLUME_ITER_SKIP_EMPTY);
+            while (volume_iter(&it, p)) {
+                volume_get_at(l->volume, &it, p, c);
+                if (c[3]) got_cells++;
+            }
+        }
+        if (got_layers != want_layers || got_cells != want_cells)
+            snprintf(why, why_size,
+                     "the candidate gox reads back as %d layer(s)/%d cell(s), "
+                     "expected %d/%d", got_layers, got_cells,
+                     want_layers, want_cells);
+        else
+            ok = true;
+    }
+    image_delete(goxel.image);
+    goxel.image = saved;
+    return ok;
+}
+
+// PM rev4 (P0-1): the gox wrapper cannot report write failures itself, so
+// the two promotion switches carry a one-shot fault the self-test can arm
+// to prove the restore paths.  The variable is unset in normal use, and
+// each fault fires at most once per process.
+static bool nav_fault(const char *which)
+{
+    static char fired[64];
+    const char *env = getenv("GOXEL_NAV_FAULT");
+
+    if (!env || strcmp(env, which) != 0 || strstr(fired, which)) return false;
+    strncat(fired, which, sizeof(fired) - strlen(fired) - 1);
+    return true;
+}
+
 int nav_save(const char *path, char *err, size_t err_size)
 {
     nav_record_t *r;
     uint8_t sha[32];
     char hex[65];
-    char sidecar[600], tmp[640], base[256];
-    char cand[640], lg_gox[660], lg_side[680];
+    char sidecar[600], base[256], why[160];
+    char cand[640], cand_side[660], lg_gox[660], lg_side[680];
     char esc[1024], esc2[1024], esc3[2048], esc4[1024];
+    char *keep_export_path;
+    const char *keep_export_fmt;
     FILE *f;
     int rc, total = 0, i = 0;
+    bool had_gox, had_side;
 
 #define FAILS(...) do { snprintf(err, err_size, ##__VA_ARGS__); return -1; } while (0)
 
@@ -1237,17 +1355,37 @@ int nav_save(const char *path, char *err, size_t err_size)
     }
     if (!path || !*path) FAILS("no path");
 
-    // PM rev3 R3-3: never overwrite an approved pair with unverified bytes.
-    // The gox is exported to a candidate path and read back; only then does
-    // the previous pair move aside as .lastgood (a recoverable point) and
-    // the candidate move into place.  If any step fails, the original pair
-    // is untouched and says so.
+    // PM rev4 (P0-1): both halves of the pair are staged and validated as
+    // candidates BEFORE either live file is touched, and every failure from
+    // the promotion on puts the previous pair back.  A failed publish can
+    // leave the old pair exactly as it was or say where the recovery point
+    // is — never a split or missing current pair that could masquerade as
+    // valid.  PM rev3 R3-3 / rev4 P0-2: gox_export cannot report a failed
+    // write, so the candidate gox is proven by reading it back — magic and
+    // size first, then a real round-trip against the live document.
     snprintf(cand, sizeof(cand), "%s.new", path);
     remove(cand);
+    // PM rev4 (P1): goxel_export_to_file remembers the destination on the
+    // image (a later Ctrl+E exports there).  The staging path must never
+    // become that memory: keep the Owner's setting and put it back.
+    keep_export_path = goxel.image->export_path
+                           ? strdup(goxel.image->export_path) : NULL;
+    keep_export_fmt = goxel.image->export_fmt;
     rc = goxel_export_to_file(cand, "gox");
-    if (rc || !nav_gox_reads_ok(cand)) {
+    free(goxel.image->export_path);
+    goxel.image->export_path = keep_export_path;
+    goxel.image->export_fmt = keep_export_fmt;
+    if (rc) {
+        remove(cand);
+        FAILS("the gox export reported failure");
+    }
+    if (!nav_gox_reads_ok(cand)) {
         remove(cand);
         FAILS("the gox export did not produce a readable file");
+    }
+    if (!nav_gox_validate(cand, why, sizeof(why))) {
+        remove(cand);
+        FAILS("%s", why);
     }
     if (nav_sha256_file(cand, sha)) {
         remove(cand);
@@ -1255,35 +1393,18 @@ int nav_save(const char *path, char *err, size_t err_size)
     }
     nav_sha256_hex(sha, hex);
     nav_sidecar_path(path, sidecar, sizeof(sidecar));
-    if (nav_gox_reads_ok(path)) {
-        // An existing pair: preserve it before replacing it.
-        snprintf(lg_gox, sizeof(lg_gox), "%s.lastgood", path);
-        snprintf(lg_side, sizeof(lg_side), "%s.lastgood", sidecar);
-        remove(lg_gox);
-        remove(lg_side);
-        if (rename(path, lg_gox) != 0) {
-            remove(cand);
-            FAILS("cannot preserve the previous gox as %s", lg_gox);
-        }
-        {
-            FILE *probe = fopen(sidecar, "rb");
-            if (probe) {
-                fclose(probe);
-                rename(sidecar, lg_side);
-            }
-        }
-    }
-    if (rename(cand, path) != 0) {
-        remove(cand);
-        FAILS("cannot move the gox into place; the previous pair is preserved");
-    }
-    snprintf(tmp, sizeof(tmp), "%s.tmp", sidecar);
-    f = fopen(tmp, "wb");
-    if (!f) FAILS("cannot write %s (the new gox is already in place; the "
-                  "previous pair is preserved as .lastgood)", tmp);
 
+    // Stage the sidecar too — pinned to the candidate's bytes — and read it
+    // back before anything is promoted (P0-1).
     // PM review #541 (5): every string is JSON-escaped; a Windows path with
     // backslashes or spaces publishes as valid JSON, not a broken file.
+    snprintf(cand_side, sizeof(cand_side), "%s.new", sidecar);
+    remove(cand_side);
+    f = fopen(cand_side, "wb");
+    if (!f) {
+        remove(cand);
+        FAILS("cannot stage the sidecar next to %s", path);
+    }
     nav_basename(path, base, sizeof(base));
     json_escape(base, esc, sizeof(esc));
     json_escape(path, esc3, sizeof(esc3));
@@ -1322,11 +1443,72 @@ int nav_save(const char *path, char *err, size_t err_size)
                 (unsigned long long)r->seq, (++i < total) ? "," : "");
     }
     fprintf(f, " ]\n}\n");
-    fclose(f);
-    if (rename(tmp, sidecar) != 0) {
-        remove(sidecar);
-        if (rename(tmp, sidecar) != 0)
-            FAILS("cannot move the sidecar into place");
+    if (fclose(f) != 0) {
+        remove(cand);
+        remove(cand_side);
+        FAILS("the staged sidecar did not flush");
+    }
+    {
+        static char probe[8192];
+        FILE *pf = fopen(cand_side, "rb");
+        size_t n = 0;
+
+        if (pf) {
+            n = fread(probe, 1, sizeof(probe) - 1, pf);
+            fclose(pf);
+            probe[n] = 0;
+        }
+        if (n == 0 || !strstr(probe, hex) || !strstr(probe, "\"records\"")) {
+            remove(cand);
+            remove(cand_side);
+            FAILS("the staged sidecar did not read back with its pin");
+        }
+    }
+
+    // Both halves are staged and validated.  From here on, every failure
+    // restores the previous live pair (P0-1).
+    snprintf(lg_gox, sizeof(lg_gox), "%s.lastgood", path);
+    snprintf(lg_side, sizeof(lg_side), "%s.lastgood", sidecar);
+    had_gox = nav_gox_reads_ok(path);
+    {
+        FILE *probe = fopen(sidecar, "rb");
+        had_side = probe != NULL;
+        if (probe) fclose(probe);
+    }
+    // The previous backup goes only now: the live pair is intact and the
+    // replacement is fully staged, so recovery never got worse at this step.
+    remove(lg_gox);
+    remove(lg_side);
+    if (had_gox && rename(path, lg_gox) != 0) {
+        remove(cand);
+        remove(cand_side);
+        FAILS("cannot preserve the previous gox; nothing was published");
+    }
+    if (had_side && rename(sidecar, lg_side) != 0) {
+        if (had_gox) rename(lg_gox, path);
+        remove(cand);
+        remove(cand_side);
+        FAILS("cannot preserve the previous sidecar; the previous pair "
+              "was restored");
+    }
+    if (nav_fault("promote_gox") || rename(cand, path) != 0) {
+        if (had_side) rename(lg_side, sidecar);
+        if (had_gox && rename(lg_gox, path) != 0)
+            FAILS("cannot promote the gox and cannot restore: the previous "
+                  "pair is at %s / %s", lg_gox, lg_side);
+        remove(cand);
+        remove(cand_side);
+        FAILS("cannot promote the gox; the previous pair was restored");
+    }
+    if (nav_fault("promote_side") || rename(cand_side, sidecar) != 0) {
+        remove(path);   // the new gox alone would masquerade as a pair
+        if (had_side) rename(lg_side, sidecar);
+        if (had_gox && rename(lg_gox, path) != 0)
+            FAILS("cannot promote the sidecar and cannot restore: the "
+                  "previous pair is at %s / %s", lg_gox, lg_side);
+        remove(cand);
+        remove(cand_side);
+        FAILS("cannot promote the sidecar; the previous pair was restored");
     }
     snprintf(s_doc, sizeof(s_doc), "%s", path);
     printf("nav: saved %s + %s (gox sha %s)\n", path, sidecar, hex);

@@ -46,6 +46,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <direct.h>
 #include <sys/stat.h>
 
 static int s_checks, s_failed;
@@ -1356,6 +1357,124 @@ int nav_test_run(const char *fixture, const char *outdir)
               "R3-4: the current v2 sidecar still adopts green");
         remove(oldgox);
         remove(oldside);
+    }
+
+    // 16. PM rev4: paired publication is fail-safe (P0-1), the candidate is
+    //     validated as real content (P0-2), and the staging path never
+    //     becomes the Owner's remembered export destination (P1).
+    {
+        char hex_a[65], hex_b[65];
+        uint8_t sha_a[32];
+        char whyb[160];
+        nav_sha256_file(path, sha_a);
+        nav_sha256_hex(sha_a, hex_a);
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        bridge(cmd);
+        CHECK(reply_has("saved") && reply_has("ok"),
+              "rev4: a normal publish still succeeds");
+        CHECK(goxel.image->export_path == NULL ||
+              !strstr(goxel.image->export_path, ".new"),
+              "P1: the staging path never becomes the remembered export path");
+        // P0-2: the published gox round-trips; a truncated one is refused
+        CHECK(nav_gox_validate(path, whyb, sizeof(whyb)),
+              "P0-2: the published gox loads back with matching layers/cells");
+        {
+            char trunc[600];
+            FILE *src, *dst;
+            long sz;
+            char *buf;
+            snprintf(trunc, sizeof(trunc), "%s/navtest_trunc.gox",
+                     outdir && *outdir ? outdir : ".");
+            src = fopen(path, "rb");
+            dst = fopen(trunc, "wb");
+            if (src && dst) {
+                fseek(src, 0, SEEK_END);
+                sz = ftell(src);
+                fseek(src, 0, SEEK_SET);
+                buf = malloc(sz);
+                if (buf) {
+                    size_t n = fread(buf, 1, sz, src);
+                    fwrite(buf, 1, n / 3, dst);  // header survives, content does not
+                    free(buf);
+                }
+            }
+            if (src) fclose(src);
+            if (dst) fclose(dst);
+            CHECK(!nav_gox_validate(trunc, whyb, sizeof(whyb)),
+                  "P0-2: a truncated gox with an intact header is refused (%s)",
+                  whyb);
+            remove(trunc);
+        }
+        // change the document so a new publish would carry different bytes
+        body = body_layer_with_cells();
+        goxel.image->active_layer = body;
+        bridge("set 5 5 5 30 30 30");
+        CHECK(!nav_gox_validate(path, whyb, sizeof(whyb)),
+              "P0-2: the previous gox now reads back short of the live "
+              "cells (%s)", whyb);
+        // P0-1: sidecar staging cannot open -> live pair untouched
+        {
+            char cdir[700], inner[740];
+            FILE *ip;
+            snprintf(cdir, sizeof(cdir), "%s.new", sidecar);
+            remove(cdir);
+            mkdir(cdir);
+            snprintf(inner, sizeof(inner), "%s/x", cdir);
+            ip = fopen(inner, "wb");
+            if (ip) fclose(ip);
+            snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+            CHECK(call_fails(cmd),
+                  "P0-1: a sidecar staging failure is reported, not swallowed");
+            remove(inner);
+            rmdir(cdir);
+            nav_sha256_file(path, sha_a);
+            nav_sha256_hex(sha_a, hex_b);
+            CHECK(!strcmp(hex_a, hex_b),
+                  "P0-1: the staging failure left the live pair untouched");
+        }
+        // P0-1: interrupted promotion at the gox switch -> auto-restore
+        _putenv("GOXEL_NAV_FAULT=promote_gox");
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        CHECK(call_fails(cmd),
+              "P0-1: an interrupted gox promotion is reported");
+        _putenv("GOXEL_NAV_FAULT=");
+        nav_sha256_file(path, sha_a);
+        nav_sha256_hex(sha_a, hex_b);
+        CHECK(!strcmp(hex_a, hex_b),
+              "P0-1: the previous pair was restored after the gox switch failed");
+        // P0-1: interrupted promotion at the sidecar switch -> auto-restore
+        _putenv("GOXEL_NAV_FAULT=promote_side");
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        CHECK(call_fails(cmd),
+              "P0-1: an interrupted sidecar promotion is reported");
+        _putenv("GOXEL_NAV_FAULT=");
+        nav_sha256_file(path, sha_a);
+        nav_sha256_hex(sha_a, hex_b);
+        CHECK(!strcmp(hex_a, hex_b),
+              "P0-1: the previous pair was restored after the sidecar switch failed");
+        // no split pair: the live sidecar still pins the live gox
+        {
+            FILE *pf = fopen(sidecar, "rb");
+            char t[4096];
+            size_t n = 0;
+            bool pinned = false;
+            if (pf) {
+                n = fread(t, 1, sizeof(t) - 1, pf);
+                fclose(pf);
+                t[n] = 0;
+                pinned = strstr(t, hex_a) != NULL;
+            }
+            CHECK(pinned,
+                  "P0-1: the live sidecar still pins the live gox after the "
+                  "failed promotions");
+        }
+        // and a clean retry now publishes the changed document
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        bridge(cmd);
+        nav_sha256_file(path, sha_a);
+        nav_sha256_hex(sha_a, hex_b);
+        CHECK(reply_has("saved") && strcmp(hex_a, hex_b) != 0,
+              "rev4: the retry after the faults publishes the new pair");
     }
 
     printf("nav test: all steps executed\n");

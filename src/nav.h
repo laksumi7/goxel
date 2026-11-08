@@ -176,6 +176,13 @@ void nav_notify_opened(const char *path);
 // Save the gox and write the record sidecar in one step, only for a coherent
 // package.  Returns 0, or a negative refusal (the buffer says why).
 int nav_save(const char *path, char *err, size_t err_size);
+
+// PM rev4 (P0-2): magic and size are not content.  A candidate gox is only
+// publishable when it loads back as the same model: same layer count and
+// same occupied-cell count as the live document.  Returns true on success;
+// `why` explains otherwise.  Public so the self-test can feed it a
+// deliberately broken file.
+bool nav_gox_validate(const char *path, char *why, size_t why_size);
 // Adopt the sidecar paired with `gox_path` (the worker re-adopting after a
 // reopen, or the automatic path on a matching gox).  Marks everything needs_
 // review when the gox does not match the pin.
