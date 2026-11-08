@@ -813,6 +813,222 @@ static void cmd_pickmode(const char *args)
     out_add("ok\n");
 }
 
+// Delete layers by exact name, id, or name prefix (QA authoring helper,
+// #541 Owner session 2026-11-09: clear the hull's old turrets + hardpoints).
+static void cmd_dellayer(const char *args)
+{
+    char name[128] = "", sid[16] = "";
+    layer_t *l, *tmp;
+    int id, deleted = 0;
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    if (slope_session_is_open()) {
+        out_add("err a shape session is open; close it first\n");
+        return;
+    }
+    if (opt_get(args, "prefix", name, sizeof(name))) {
+        size_t n = strlen(name);
+        DL_FOREACH_SAFE(goxel.image->layers, l, tmp) {
+            if (!strncmp(l->name, name, n)) {
+                image_delete_layer(goxel.image, l);
+                deleted++;
+            }
+        }
+    } else if (opt_get(args, "name", name, sizeof(name))) {
+        DL_FOREACH_SAFE(goxel.image->layers, l, tmp) {
+            if (!strcmp(l->name, name)) {
+                image_delete_layer(goxel.image, l);
+                deleted++;
+            }
+        }
+    } else if (opt_get(args, "id", sid, sizeof(sid))) {
+        id = atoi(sid);
+        DL_FOREACH_SAFE(goxel.image->layers, l, tmp) {
+            if (l->id == id) {
+                image_delete_layer(goxel.image, l);
+                deleted++;
+            }
+        }
+    } else {
+        out_add("err usage: dellayer name=<exact> | id=<lid> | prefix=<str>\n");
+        return;
+    }
+    if (!deleted) { out_add("err no layer matched\n"); return; }
+    image_history_push(goxel.image);
+    out_fmt("dellayer deleted=%d\nok\n", deleted);
+}
+
+// List every cell of an exact RGB across all layers (#541 Owner session:
+// the Owner paints a brown marker voxel where a turret yaw axis belongs).
+static void cmd_find(const char *args)
+{
+    int r, g, b, n = 0;
+    layer_t *l;
+    volume_iterator_t iter;
+    uint8_t c[4];
+    int p[3];
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    if (sscanf(args, "%d %d %d", &r, &g, &b) != 3) {
+        out_add("err usage: find r g b (0-255)\n");
+        return;
+    }
+    DL_FOREACH(goxel.image->layers, l) {
+        if (!l->volume) continue;
+        iter = volume_get_iterator(l->volume, VOLUME_ITER_VOXELS |
+                                   VOLUME_ITER_SKIP_EMPTY);
+        while (volume_iter(&iter, p)) {
+            volume_get_at(l->volume, &iter, p, c);
+            if (!c[3]) continue;
+            if (c[0] == r && c[1] == g && c[2] == b) {
+                out_fmt("find layer=%d name='%s' cell %d %d %d\n",
+                        l->id, l->name, p[0], p[1], p[2]);
+                n++;
+            }
+        }
+    }
+    out_fmt("find count=%d\nok\n", n);
+}
+
+// List the distinct RGBA colours actually used across all layers, with cell
+// counts (#541 Owner session: find the Owner's marker colour before `find`).
+static void cmd_colors(void)
+{
+    struct colent { int r, g, b, a, n; struct colent *prev, *next; };
+    layer_t *l;
+    volume_iterator_t iter;
+    uint8_t c[4];
+    int p[3];
+    struct colent *list = NULL, *e, *tmp;
+    int found;
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    DL_FOREACH(goxel.image->layers, l) {
+        if (!l->volume) continue;
+        iter = volume_get_iterator(l->volume, VOLUME_ITER_VOXELS |
+                                   VOLUME_ITER_SKIP_EMPTY);
+        while (volume_iter(&iter, p)) {
+            volume_get_at(l->volume, &iter, p, c);
+            if (!c[3]) continue;
+            found = 0;
+            DL_FOREACH(list, e) {
+                if (e->r == c[0] && e->g == c[1] && e->b == c[2] &&
+                        e->a == c[3]) { e->n++; found = 1; break; }
+            }
+            if (!found) {
+                e = calloc(1, sizeof(*e));
+                e->r = c[0]; e->g = c[1]; e->b = c[2]; e->a = c[3]; e->n = 1;
+                DL_PREPEND(list, e);
+            }
+        }
+    }
+    DL_FOREACH(list, e)
+        out_fmt("color %d %d %d %d count=%d\n", e->r, e->g, e->b, e->a, e->n);
+    DL_FOREACH_SAFE(list, e, tmp) { DL_DELETE(list, e); free(e); }
+    out_add("ok\n");
+}
+
+// Dump every occupied cell of a layer (or all layers) with its colour, so a
+// part can be transplanted between documents (#541 Owner session 2026-11-09).
+static void cmd_dump(const char *args)
+{
+    char want[128] = "";
+    layer_t *l;
+    volume_iterator_t iter;
+    uint8_t c[4];
+    int p[3];
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    opt_get(args, "layer", want, sizeof(want));
+    DL_FOREACH(goxel.image->layers, l) {
+        if (want[0] && strcmp(l->name, want)) continue;
+        if (!l->volume) continue;
+        iter = volume_get_iterator(l->volume, VOLUME_ITER_VOXELS |
+                                   VOLUME_ITER_SKIP_EMPTY);
+        while (volume_iter(&iter, p)) {
+            volume_get_at(l->volume, &iter, p, c);
+            if (!c[3]) continue;
+            out_fmt("dump lid=%d name='%s' cell %d %d %d rgb %d %d %d\n",
+                    l->id, l->name, p[0], p[1], p[2], c[0], c[1], c[2]);
+        }
+    }
+    out_add("ok\n");
+}
+
+// Create a new empty layer and make it active (the counterpart of
+// `dellayer`; #541 Owner session: rebuild a transplanted part layer by
+// layer).  A layer with the same name already in use is refused.
+static void cmd_newlayer(const char *args)
+{
+    char name[128] = "";
+    layer_t *l, *nl;
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    if (!opt_get(args, "name", name, sizeof(name)) || !name[0]) {
+        out_add("err usage: newlayer name=<name>\n");
+        return;
+    }
+    DL_FOREACH(goxel.image->layers, l) {
+        if (!strcmp(l->name, name)) {
+            out_fmt("err layer '%s' already exists\n", name);
+            return;
+        }
+    }
+    nl = image_add_layer(goxel.image, NULL);
+    if (!nl) { out_add("err cannot add layer\n"); return; }
+    snprintf(nl->name, sizeof(nl->name), "%s", name);
+    image_history_push(goxel.image);
+    out_fmt("newlayer '%s' lid=%d active\n", nl->name, nl->id);
+    out_add("ok\n");
+}
+
+// Report every layer holding a cell at one position (#541 Owner session:
+// check hull overlap before transplanting, and recover the original colour
+// underneath the Owner's marker voxels).
+static void cmd_get(const char *args)
+{
+    int pos[3];
+    layer_t *l;
+    uint8_t c[4];
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    if (sscanf(args, "%d %d %d", &pos[0], &pos[1], &pos[2]) != 3) {
+        out_add("err usage: get x y z\n");
+        return;
+    }
+    DL_FOREACH(goxel.image->layers, l) {
+        if (!l->volume) continue;
+        volume_get_at(l->volume, NULL, pos, c);
+        if (c[3])
+            out_fmt("get lid=%d name='%s' rgb %d %d %d\n",
+                    l->id, l->name, c[0], c[1], c[2]);
+    }
+    out_add("ok\n");
+}
+
+// Make a layer active by name, so `set`/`del` land on it (#541 Owner
+// session: repair a specific hull layer without touching the others).
+static void cmd_active(const char *args)
+{
+    char name[128] = "";
+    layer_t *l;
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    if (!opt_get(args, "name", name, sizeof(name)) || !name[0]) {
+        out_add("err usage: active name=<layer>\n");
+        return;
+    }
+    DL_FOREACH(goxel.image->layers, l) {
+        if (!strcmp(l->name, name)) {
+            goxel.image->active_layer = l;
+            out_fmt("active '%s' lid=%d\n", l->name, l->id);
+            out_add("ok\n");
+            return;
+        }
+    }
+    out_fmt("err no layer '%s'\n", name);
+}
+
 static void handle_line(const char *line)
 {
     char cmd[32] = "";
@@ -862,6 +1078,20 @@ static void handle_line(const char *line)
         cmd_open(args);
     } else if (!strcmp(cmd, "pointer")) {
         cmd_pointer(args);
+    } else if (!strcmp(cmd, "dellayer")) {
+        cmd_dellayer(args);
+    } else if (!strcmp(cmd, "find")) {
+        cmd_find(args);
+    } else if (!strcmp(cmd, "colors")) {
+        cmd_colors();
+    } else if (!strcmp(cmd, "dump")) {
+        cmd_dump(args);
+    } else if (!strcmp(cmd, "newlayer")) {
+        cmd_newlayer(args);
+    } else if (!strcmp(cmd, "get")) {
+        cmd_get(args);
+    } else if (!strcmp(cmd, "active")) {
+        cmd_active(args);
     } else if (!strcmp(cmd, "pickmode")) {
         cmd_pickmode(args);
     } else if (!strcmp(cmd, "help")) {
@@ -873,7 +1103,8 @@ static void handle_line(const char *line)
                 "nbase=navrev | untag id=<id> base=rev nbase=navrev | "
                 "navsave [path=\"..\"|path=..] [base=rev] | navadopt path=.. | "
                 "open path=.. | pointer [list]|add x y z|del x y z|clear | "
-                "pickmode on|off|get | help\n"
+                "pickmode on|off|get | dellayer name=..|id=..|prefix=.. | "
+                "find r g b | help\n"
                 "geometry verbs accept base=<rev>; the semantic verbs (tag,\n"
                 "confirm, untag) require base=<rev> AND nbase=<navrev>, both\n"
                 "read from 'state' (rev / navrev lines); a stale or missing\n"
