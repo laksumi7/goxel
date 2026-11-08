@@ -17,6 +17,7 @@
  */
 
 #include "goxel.h"
+#include "nav.h"
 
 static const uint8_t ORIGIN_COLOR[4] = { 255, 0, 0, 255 };
 
@@ -72,6 +73,8 @@ static void move(layer_t *layer, const float mat[4][4])
         // AMFM #534 P0: the generated surface is built in world cells, so it
         // has to be translated with the voxels or it is left behind.
         slope_move_surface(layer, m);
+        // AMFM #541: the nav records anchored on this layer move with it.
+        nav_move_delta_layer(layer, m);
         if (!box_is_null(layer->box)) {
             mat4_mul(m, layer->box, layer->box);
             box_get_bbox(layer->box, layer->box);

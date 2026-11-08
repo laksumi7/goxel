@@ -17,6 +17,7 @@
  */
 
 #include "goxel.h"
+#include "nav.h"
 #include "xxhash.h"
 
 
@@ -750,11 +751,18 @@ image_move_t *image_move_begin(image_t *img, const volume_t *mask)
 
     if (!img || !mask || !volume_has_cells(mask)) return NULL;
 
+    // AMFM #541: a replayed transform moves the nav records anchored to the
+    // cells inside this mask, exactly the way the cells move.
+    nav_transform_begin();
     DL_FOREACH(img->layers, l) {
         volume_t *sel = volume_copy(l->volume);
         volume_merge(sel, mask, MODE_INTERSECT, NULL);
         if (volume_has_cells(sel)) n++;
         volume_delete(sel);
+    }
+    if (!n) {
+        nav_transform_end();
+        return NULL;
     }
     if (!n) return NULL;
 
@@ -765,6 +773,8 @@ image_move_t *image_move_begin(image_t *img, const volume_t *mask)
         volume_merge(sel, mask, MODE_INTERSECT, NULL);
         if (!volume_has_cells(sel)) { volume_delete(sel); continue; }
         mv->it[i].layer = l;
+        // AMFM #541: which nav records sit inside this mask.
+        nav_transform_mark(l);
         if (l->slope) {
             // A generated surface is one object.  If the selection reached any
             // of its cells, take every cell it owns, not just the ones the box
@@ -810,6 +820,8 @@ void image_move_apply(image_move_t *mv, const float mat[4][4])
         volume_set(l->volume, mv->it[i].keep);
         volume_merge(l->volume, tmp, MODE_OVER, NULL);
         volume_delete(tmp);
+        // AMFM #541: the nav records anchored in this mask follow.
+        nav_move_snap_layer(l, mat);
         if (mv->it[i].has_slope) {
             // Start from the snapshot each frame, so repeated applies during a
             // drag cannot accumulate.
@@ -822,13 +834,18 @@ void image_move_apply(image_move_t *mv, const float mat[4][4])
 void image_move_end(image_move_t *mv)
 {
     int i;
-    if (!mv) return;
+    if (!mv) {
+        nav_transform_end();
+        return;
+    }
     for (i = 0; i < mv->n; i++) {
         volume_delete(mv->it[i].keep);
         volume_delete(mv->it[i].sel);
     }
     free(mv->it);
     free(mv);
+    // AMFM #541: the replayed transform is done; commit the anchors.
+    nav_transform_end();
 }
 
 bool image_move_partial(const image_move_t *mv)

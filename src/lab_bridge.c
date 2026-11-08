@@ -14,6 +14,7 @@
 #include "goxel.h"
 #include "image.h"
 #include "layer.h"
+#include "nav.h"
 #include "slope.h"
 #include "volume.h"
 
@@ -145,6 +146,11 @@ static const char *edit_guard(void)
     return NULL;
 }
 
+// AMFM #541: defined with the other navigator verbs; the earlier verbs (state,
+// set) report and guard on the same revision.
+static uint32_t doc_rev(void);
+static bool rev_check(const char *args, uint32_t *rev_output);
+
 static void cmd_state(void)
 {
     int aabb[2][3] = {{0, 0, 0}, {0, 0, 0}};
@@ -160,9 +166,13 @@ static void cmd_state(void)
         out_add("no image\nok\n");
         return;
     }
+    // AMFM #541: the document revision a worker carries in `base=` on every
+    // mutating verb; it changes whenever the image changes at all.
+    out_fmt("rev %u\ntags %d\n", doc_rev(), nav_count());
     out_fmt("painter_mode %d\n", goxel.painter.mode);
     if (img->active_layer)
-        out_fmt("active '%s' shape=%d cells=%d\n", img->active_layer->name,
+        out_fmt("active '%s' lid=%d shape=%d cells=%d\n",
+                img->active_layer->name, img->active_layer->id,
                 img->active_layer->slope ? 1 : 0,
                 count_cells(img->active_layer->volume));
     if (img->selection_mask && volume_get_bbox(img->selection_mask, aabb, true))
@@ -171,8 +181,8 @@ static void cmd_state(void)
     else
         out_add("selection none\n");
     DL_FOREACH(img->layers, l) {
-        out_fmt("layer[%d] '%s' cells=%d shape=%d%s\n", i++, l->name,
-                count_cells(l->volume), l->slope ? 1 : 0,
+        out_fmt("layer[%d] '%s' lid=%d cells=%d shape=%d%s\n", i++, l->name,
+                l->id, count_cells(l->volume), l->slope ? 1 : 0,
                 l == img->active_layer ? " ACTIVE" : "");
     }
     // The history is a plain list of snapshots and `img` itself is not part of
@@ -200,6 +210,9 @@ static void cmd_set(const char *args, int del)
         out_add("err position out of range\n");
         return;
     }
+    // AMFM #541: a worker edit that assumed a document revision the editor
+    // has already left behind is refused, never replayed.
+    if (!rev_check(args, NULL)) return;
     err = edit_guard();
     if (err) {
         out_fmt("err %s\n", err);
@@ -212,6 +225,9 @@ static void cmd_set(const char *args, int del)
             out_fmt("noop %d %d %d already empty\n", pos[0], pos[1], pos[2]);
             return;
         }
+        // The removal writes transparent: reading the cell back and writing
+        // it again (the old behaviour) left the voxel standing.
+        col[0] = col[1] = col[2] = col[3] = 0;
     } else if (sscanf(args, "%*d %*d %*d %hhu %hhu %hhu",
                       &col[0], &col[1], &col[2]) == 3) {
         col[3] = 255;
@@ -234,6 +250,7 @@ static void cmd_set(const char *args, int del)
 // so a single Ctrl+Z in the editor takes the barrel back to its square cell.
 static void cmd_shape(const char *args)
 {
+    char buf[192];
     int cell[3];
     int before, layers_before = 0, layers_after = 0;
     float rise = 0.45f;
@@ -242,7 +259,16 @@ static void cmd_shape(const char *args)
     layer_t *l;
     int rc;
 
-    if (sscanf(args, "%d %d %d %f %63s", &cell[0], &cell[1], &cell[2],
+    // A local copy: the base= guard token cannot reach the layer name.
+    snprintf(buf, sizeof(buf), "%s", args ? args : "");
+    // AMFM #541: refuse a stale worker write before it touches the model.
+    if (!rev_check(args, NULL)) return;
+    // Revcheck acted on the guard value; drop it from the parse copy.
+    {
+        char *q = strstr(buf, " base=");
+        if (q) *q = 0;
+    }
+    if (sscanf(buf, "%d %d %d %f %63s", &cell[0], &cell[1], &cell[2],
                &rise, name) < 3) {
         out_add("err usage: shape x y z [rise] [name]\n");
         return;
@@ -280,6 +306,340 @@ static void cmd_shape(const char *args)
     }
 }
 
+// #### AMFM #541: the navigator verbs #####################################
+
+// A value of a space-separated KEY=VALUE list; longest match wins.
+static bool opt_get(const char *args, const char *key, char out[], size_t size)
+{
+    char pat[40];
+    const char *p;
+    size_t n = 0;
+
+    snprintf(pat, sizeof(pat), "%s=", key);
+    p = args;
+    while (p) {
+        p = strstr(p, pat);
+        if (!p) return false;
+        // Only a token that starts here: either a fresh argument or the
+        // whole string.
+        if (p != args && (p[-1] != ' ' && p[-1] != '\t')) {
+            p = NULL;
+            continue;
+        }
+        break;
+    }
+    if (!p) return false;
+    p += strlen(pat);
+    while (*p && *p != ' ' && *p != '\t' && n + 1 < size) out[n++] = *p++;
+    out[n] = 0;
+    return true;
+}
+
+// An axis token like "+Y" or "-Z" into a unit-ish vector, or false.
+static bool axis_token(const char *in, int out[3])
+{
+    int sign, axis;
+
+    if (!in || ((in[0] != '+') && (in[0] != '-'))) return false;
+    sign = (in[0] == '+') ? 1 : -1;
+    axis = (in[1] == 'x' || in[1] == 'X') ? 0 :
+           (in[1] == 'y' || in[1] == 'Y') ? 1 :
+           (in[1] == 'z' || in[1] == 'Z') ? 2 : -1;
+    if (axis < 0 || in[2]) return false;
+    out[0] = out[1] = out[2] = 0;
+    out[axis] = sign;
+    return true;
+}
+
+// The document revision a worker last saw: it changes when the image changes,
+// so every mutating verb can refuse a stale write deterministically.
+static uint32_t doc_rev(void)
+{
+    return goxel.image ? image_get_key(goxel.image) : 0;
+}
+
+static bool rev_check(const char *args, uint32_t *rev_output)
+{
+    char v[32];
+    uint32_t base;
+    uint32_t rev = doc_rev();
+    if (rev_output) *rev_output = rev;
+    if (!args) return true;
+    if (!opt_get(args, "base", v, sizeof(v))) return true;
+    base = (uint32_t)strtoul(v, NULL, 10);
+    if (base == rev) return true;
+    out_fmt("err doc changed since base %u (now rev %u): re-read state\n",
+            base, rev);
+    return false;
+}
+
+// The exact confirmed cells of the selection, grouped by the layer they sit
+// in, plus the shape parameters and computed end faces when relevant: the
+// answer to "what am I actually holding", not a bounding box.
+static void cmd_selinfo(void)
+{
+    volume_iterator_t iter;
+    uint8_t c[4];
+    int p[3], n = 0;
+    layer_t *l;
+    int hits;
+    const slope_mod_t *m;
+
+    if (!goxel.image) {
+        out_add("err no image\n");
+        return;
+    }
+    if (!goxel.image->selection_mask) {
+        out_add("err no selection\nok\n");
+        return;
+    }
+    out_fmt("selrev %u\n", doc_rev());
+    DL_FOREACH(goxel.image->layers, l) {
+        hits = 0;
+        iter = volume_get_iterator(goxel.image->selection_mask,
+                                   VOLUME_ITER_VOXELS |
+                                   VOLUME_ITER_SKIP_EMPTY);
+        while (volume_iter(&iter, p)) {
+            volume_get_at(goxel.image->selection_mask, &iter, p, c);
+            if (!c[3]) continue;
+            if (l->volume && volume_get_alpha_at(l->volume, NULL, p))
+                hits++;
+        }
+        if (hits || l == goxel.image->active_layer) {
+            out_fmt("obj layer=%d name='%s' cells=%d%s%s\n", l->id, l->name,
+                    hits, l == goxel.image->active_layer ? " ACTIVE" : "",
+                    l->slope ? " shape=yes" : "");
+        }
+    }
+    // The shape layers of the selection: static params and the two ends.
+    DL_FOREACH(goxel.image->layers, l) {
+        if (!l->slope) continue;
+        m = l->slope;
+        if (!l->volume) continue;
+        {
+            float u[3], pa[3], pb[3];
+            int a;
+            nav_dir_vec(m->dir, u);
+            a = (m->dir == SLOPE_DIR_PX || m->dir == SLOPE_DIR_NX) ? 0 : 1;
+            pa[a] = (float)m->aabb[0][a];
+            pb[a] = (float)m->aabb[1][a] + 1.f;
+            pa[(a + 1) % 3] = pb[(a + 1) % 3] =
+                (m->aabb[0][(a + 1) % 3] + m->aabb[1][(a + 1) % 3] + 1.f) / 2.f;
+            pa[(a + 2) % 3] = pb[(a + 2) % 3] =
+                (m->aabb[0][(a + 2) % 3] + m->aabb[1][(a + 2) % 3] + 1.f) / 2.f;
+            out_fmt("shape layer=%d name='%s' kind=%s run=%+d closed=%d "
+                    "rise=%.3f aabb=%d,%d,%d..%d,%d,%d rev=%u stale=%d\n",
+                    l->id, l->name, slope_kind_name(m->kind),
+                    (m->dir == SLOPE_DIR_PX || m->dir == SLOPE_DIR_PY) ? +1 : -1,
+                    m->closed, m->rise,
+                    m->aabb[0][0], m->aabb[0][1], m->aabb[0][2],
+                    m->aabb[1][0], m->aabb[1][1], m->aabb[1][2],
+                    m->revision, m->stale);
+            out_fmt("ends layer=%d a %0.2f %0.2f %0.2f b %0.2f %0.2f %0.2f\n",
+                    l->id, pa[0], pa[1], pa[2], pb[0], pb[1], pb[2]);
+        }
+    }
+    // The exact cells, bounded: one line each; a selection on the ship is
+    // small but a box can be huge.
+    {
+        int listed = 0;
+        iter = volume_get_iterator(goxel.image->selection_mask,
+                                   VOLUME_ITER_VOXELS | VOLUME_ITER_SKIP_EMPTY);
+        while (volume_iter(&iter, p)) {
+            volume_get_at(goxel.image->selection_mask, &iter, p, c);
+            if (!c[3]) continue;
+            n++;
+        }
+        if (n > 2048) out_fmt("cells %d (first 2048)\n", n);
+        else out_fmt("cells %d\n", n);
+        iter = volume_get_iterator(goxel.image->selection_mask,
+                                   VOLUME_ITER_VOXELS | VOLUME_ITER_SKIP_EMPTY);
+        while (volume_iter(&iter, p)) {
+            volume_get_at(goxel.image->selection_mask, &iter, p, c);
+            if (!c[3]) continue;
+            if (++listed > 2048) break;
+            out_fmt("cell %d %d %d\n", p[0], p[1], p[2]);
+        }
+    }
+    out_add("ok\n");
+}
+
+static void cmd_tag(const char *args)
+{
+    char id[64] = "", kindname[24] = "", end[8] = "", group[64] = "";
+    char label[96] = "", token_err[128] = "";
+    int kind = -1, token[3] = {0, 0, 0}, axis_k;
+    nav_record_t *r;
+    layer_t *l;
+
+    if (!rev_check(args, NULL)) return;
+    if (!opt_get(args, "kind", kindname, sizeof(kindname))) {
+        out_add("err usage: tag kind=muzzle|exhaust|pivot|hinge end=+Y "
+                "id=<name> [source=layer] [group=..] [label=..]\n");
+        return;
+    }
+    if (!opt_get(args, "id", id, sizeof(id)))
+        snprintf(id, sizeof(id), "%s", kindname);
+    for (kind = 0; kind < NAV_KIND_COUNT; kind++)
+        if (!strcmp(kindname, nav_kind_name(kind))) break;
+    if (kind >= NAV_KIND_COUNT) {
+        out_fmt("err unknown kind '%s'\n", kindname);
+        return;
+    }
+
+    // The definition must come from the visible selection: a layer named by
+    // the worker is only ever a refinement of the selected object.
+    {
+        char want[64];
+        if (opt_get(args, "source", want, sizeof(want))) {
+            bool ok = goxel.image && goxel.image->active_layer &&
+                      !strcmp(want, goxel.image->active_layer->name);
+            if (!ok) {
+                out_fmt("err source '%s' is not the active selected layer "
+                        "'%s'\n", want,
+                        goxel.image && goxel.image->active_layer
+                            ? goxel.image->active_layer->name : "-");
+                return;
+            }
+        }
+    }
+
+    l = goxel.image ? goxel.image->active_layer : NULL;
+    if (!l) { out_add("err no image\n"); return; }
+    if (opt_get(args, "end", end, sizeof(end))) {
+        if (!axis_token(end, token)) {
+            out_fmt("err bad end token '%s' (use +X/-X/+Y/-Y/+Z/-Z)\n", end);
+            return;
+        }
+    } else {
+        // An end has to be named; the worker reads both candidate ends from
+        // selinfo's `ends` lines and picks the right one, deterministically.
+        out_add("err an end token is required; read the shape ends from "
+                "selinfo and pick one\n");
+        return;
+    }
+    opt_get(args, "group", group, sizeof(group));
+    opt_get(args, "label", label, sizeof(label));
+
+    axis_k = l->slope ? NAV_AT_SHAPE_END : NAV_AT_CELL;
+    r = nav_tag(id, kind, axis_k, token, group, label, token_err,
+                sizeof(token_err));
+    if (!r) { out_fmt("err %s\n", token_err); return; }
+
+    // Report both geometric ends, and what the token resolved to, so the
+    // owner's question "+Y?" is answered for both eyes at once.
+    if (r->at == NAV_AT_SHAPE_END) {
+        float u[3], pm[3], pp[3];
+        const slope_mod_t *m = l->slope;
+        int a;
+        nav_dir_vec(m->dir, u);
+        a = (m->dir == SLOPE_DIR_PX || m->dir == SLOPE_DIR_NX) ? 0 : 1;
+        pm[a] = (float)m->aabb[0][a];
+        pp[a] = (float)m->aabb[1][a] + 1.f;
+        pm[(a + 1) % 3] = pp[(a + 1) % 3] =
+            (m->aabb[0][(a + 1) % 3] + m->aabb[1][(a + 1) % 3] + 1.f) / 2.f;
+        pm[(a + 2) % 3] = pp[(a + 2) % 3] =
+            (m->aabb[0][(a + 2) % 3] + m->aabb[1][(a + 2) % 3] + 1.f) / 2.f;
+        out_fmt("ends axis=%c sign=%+d endp picked %0.2f %0.2f %0.2f\n",
+                'x' + a, r->shape_sign, pp[0], pp[1], pp[2]);
+        out_fmt("ends axis=%c sign=%+d endp other %0.2f %0.2f %0.2f\n",
+                'x' + a, -r->shape_sign, pm[0], pm[1], pm[2]);
+        out_fmt("axisdir %0.2f %0.2f %0.2f\n", u[0], u[1], u[2]);
+    }
+    out_fmt("tag id=%s kind=%s at=%s layer=%d name='%s' group=%s "
+            "status=draft\n", r->id, nav_kind_name(r->kind),
+            r->at == NAV_AT_SHAPE_END ? "shape_end" : "cell", r->layer_id,
+            l->name, r->group);
+    if (r->at == NAV_AT_CELL) {
+        out_fmt("anchored cell %d %d %d dir %d %d %d\n", r->cell[0],
+                r->cell[1], r->cell[2], (int)r->dir[0], (int)r->dir[1],
+                (int)r->dir[2]);
+    }
+    out_add("ok\n");
+}
+
+static void cmd_tags(void)
+{
+    nav_record_t *r;
+    layer_t *l;
+    float pos[3], dir[3];
+    int n = 0;
+
+    DL_FOREACH(nav_records(), r) {
+        l = nav_layer(r->layer_id);
+        pos[0] = pos[1] = pos[2] = 0;
+        dir[0] = dir[1] = dir[2] = 0;
+        {
+            float pp[3], dd[3];
+            if (nav_ring(r, pp, dd)) {
+                vec3_copy(pp, pos);
+                vec3_copy(dd, dir);
+            }
+        }
+        out_fmt("tag id=%s kind=%s at=%s layer=%d lname='%s' group=%s "
+                "status=%s pos %0.2f %0.2f %0.2f dir %0.2f %0.2f %0.2f\n",
+                r->id, nav_kind_name(r->kind),
+                r->at == NAV_AT_SHAPE_END ? "shape_end" : "cell",
+                r->layer_id, l ? l->name : "(gone)", r->group,
+                nav_status_name(r->status), pos[0], pos[1], pos[2],
+                dir[0], dir[1], dir[2]);
+        if (r->status != NAV_STATUS_CONFIRMED && r->reason[0])
+            out_fmt("review id=%s %s\n", r->id, r->reason);
+        n++;
+    }
+    out_fmt("tags %d\nok\n", n);
+}
+
+static void cmd_tag_alive(const char *id, bool confirm)
+{
+    nav_record_t *r;
+    char err[128];
+
+    if (!rev_check(NULL, NULL)) return;
+    r = nav_find(id);
+    if (!r) { out_fmt("err no record '%s'\n", id ? id : ""); return; }
+    if (confirm) {
+        if (!nav_confirm(r, err, sizeof(err))) {
+            out_fmt("err %s\n", err);
+            return;
+        }
+        out_fmt("tag id=%s status=confirmed\nok\n", r->id);
+    } else {
+        nav_remove(r);
+        out_fmt("removed %s\nok\n", id);
+    }
+}
+
+static void cmd_save_nav(const char *args)
+{
+    char path[512] = "";
+    char err[256];
+    opt_get(args, "path", path, sizeof(path));
+    if (!rev_check(args, NULL)) return;
+    if (nav_save(*path ? path : NULL, err, sizeof(err))) {
+        out_fmt("err navsave: %s\n", err);
+        return;
+    }
+    out_add("saved\nok\n");
+}
+
+static void cmd_navadopt(const char *args)
+{
+    char path[512] = "";
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    opt_get(args, "path", path, sizeof(path));
+    if (!path[0]) {
+        out_add("err navadopt needs the gox path of the reopened ship\n");
+        return;
+    }
+    {
+        int n = nav_adopt(path);
+        if (n < 0) { out_add("err navadopt failed\n"); return; }
+        out_fmt("adopted %d\nok\n", n);
+    }
+}
+
 static void handle_line(const char *line)
 {
     char cmd[32] = "";
@@ -311,9 +671,29 @@ static void handle_line(const char *line)
         if (!goxel.image) { out_add("err no image\n"); return; }
         image_redo(goxel.image);
         out_add("redo applied\nok\n");
+    } else if (!strcmp(cmd, "selinfo")) {
+        cmd_selinfo();
+    } else if (!strcmp(cmd, "tag")) {
+        cmd_tag(args);
+    } else if (!strcmp(cmd, "tags")) {
+        cmd_tags();
+    } else if (!strcmp(cmd, "confirm")) {
+        cmd_tag_alive(args, true);
+    } else if (!strcmp(cmd, "untag")) {
+        cmd_tag_alive(args, false);
+    } else if (!strcmp(cmd, "navsave")) {
+        cmd_save_nav(args);
+    } else if (!strcmp(cmd, "navadopt")) {
+        cmd_navadopt(args);
     } else if (!strcmp(cmd, "help")) {
-        out_add("commands: ping state set x y z [r g b] | del x y z | "
-                "shape x y z [rise] [name] | undo | redo | help\nok\n");
+        out_add("commands: ping | state | set x y z [r g b] | del x y z | "
+                "shape x y z [rise] [name] | undo | redo\n"
+                "#541 navigator: selinfo | tag kind=muzzle|exhaust|pivot|hinge "
+                "end=+Y|-.. id=<id> [source=..] [group=..] [label=..] "
+                "[base=rev] | tags | confirm <id> | untag <id> | "
+                "navsave [path=..] [base=rev] | navadopt path=.. | help\n"
+                "every mutating verb accepts base=<rev>; when the document has\n"
+                "changed since the worker last read `state`, it is refused.\nok\n");
     } else {
         out_fmt("err unknown command '%s'\n", cmd);
     }
@@ -386,6 +766,20 @@ void lab_bridge_init(int port, const char *doc_path)
     printf("lab bridge: listening on 127.0.0.1:%d pid=%d doc=%s\n", port,
            cur_pid(), s.doc[0] ? s.doc : "-");
     fflush(stdout);
+}
+
+// AMFM #541: the headless self-test drives the very line the client would
+// send, through the very parser, and reads the reply back.  No sockets in a
+// test; the socket path stays covered by the scripted editor sessions.
+void lab_bridge_test_call(const char *line, char *out, size_t out_size)
+{
+    out[0] = 0;
+    s.out_len = 0;
+    s.out_pos = 0;
+    handle_line(line);
+    s.out[s.out_len] = 0;
+    snprintf(out, out_size, "%s", s.out);
+    s.out_len = s.out_pos = 0;
 }
 
 void lab_bridge_iter(void)

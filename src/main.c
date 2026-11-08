@@ -18,6 +18,7 @@
 
 #include "goxel.h"
 #include "lab_bridge.h"
+#include "nav.h"
 #include "script.h"
 #include <getopt.h>
 
@@ -585,6 +586,15 @@ int main(int argc, char **argv)
     // AMFM #534: headless verification of the slope modifier invariants.
     if (getenv("GOXEL_SELFTEST")) {
         slope_selftest();
+        goto end;
+    }
+
+    // AMFM #541: headless verification of the equipment navigator.  The
+    // variable is the output directory for saved evidence; the fixture comes
+    // on GOXEL_NAV_FIXTURE.
+    if (getenv("GOXEL_NAV_TEST")) {
+        ret = nav_test_run(getenv("GOXEL_NAV_FIXTURE"),
+                           getenv("GOXEL_NAV_TEST"));
         goto end;
     }
 

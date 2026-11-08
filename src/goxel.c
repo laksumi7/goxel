@@ -19,6 +19,7 @@
 #include "goxel.h"
 
 #include "file_format.h"
+#include "nav.h"
 #include "script.h"
 #include "shader_cache.h"
 #include "xxhash.h"
@@ -1218,6 +1219,9 @@ void goxel_render_view(const float viewport[4], bool render_mode)
     // so they have to go after the queued voxel items.
     slope_render();
     slope_render_handles();
+    // AMFM #541: the equipment navigator markers, drawn with the same
+    // post-volume overlays so they read above the hull.
+    nav_render();
 }
 
 void image_update(image_t *img);
@@ -1421,6 +1425,9 @@ int goxel_import_file(const char *path, const char *format)
     }
     if (err) return err;
 
+    // AMFM #541: the equipment navigator tracks the document, so a re-opened
+    // ship can re-adopt its sidecar when the gox still matches the pin.
+    nav_notify_opened(path);
     if (image_was_empty) {
         image_auto_resize(goxel.image);
         assert(!goxel.image->export_path);

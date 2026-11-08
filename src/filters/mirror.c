@@ -18,6 +18,7 @@
 
 #include "goxel.h"
 #include "gui.h"
+#include "nav.h"
 
 typedef struct {
     filter_t filter;
@@ -159,6 +160,9 @@ static int gui(filter_t *filter)
                 mat[3][axis] = aabb[0][axis] + aabb[1][axis] - 1;
                 slope_move_surface(layer, mat);
             }
+            // AMFM #541: nav records anchored on this layer reflect the same
+            // way, so mirrored parts keep their markers on the mirrored cells.
+            nav_move_mirror_layer(layer, axis, aabb);
         }
 
         image_history_push(goxel.image);

@@ -19,10 +19,16 @@
 #ifndef LAB_BRIDGE_H
 #define LAB_BRIDGE_H
 
+#include <stddef.h>
+
 // Start listening on 127.0.0.1:<port>.  A non-positive port disables it.
 void lab_bridge_init(int port, const char *doc_path);
 
 // Called once per frame.  Never blocks.
 void lab_bridge_iter(void);
+
+// AMFM #541 test seam: run one bridge line in-process and copy the reply.
+// Used only by the headless navigator self-test.
+void lab_bridge_test_call(const char *line, char *out, size_t out_size);
 
 #endif // LAB_BRIDGE_H
