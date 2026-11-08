@@ -715,6 +715,33 @@ static void cmd_navadopt(const char *args)
     }
 }
 
+// AMFM #541 rev8: File->Open through the bridge.  Same entry point the menu
+// item uses (goxel_open_file), so the document keeps natural open semantics
+// (path set, title set, navigator re-settled).  Refuses rather than silently
+// raising the unsaved-changes modal, which would block the bridge.
+static void cmd_open(const char *args)
+{
+    char path[512] = "";
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    if (!opt_get(args, "path", path, sizeof(path)) || !path[0]) {
+        out_add("err usage: open path=<file.gox>\n");
+        return;
+    }
+    if (image_get_key(goxel.image) != goxel.image->saved_key) {
+        out_add("err unsaved changes; save or reset first\n");
+        return;
+    }
+    {
+        FILE *probe = fopen(path, "rb");
+        if (!probe) { out_fmt("err cannot read '%s'\n", path); return; }
+        fclose(probe);
+    }
+    goxel_open_file(path);
+    snprintf(s.doc, sizeof(s.doc), "%s", path);
+    out_fmt("opened %s\nok\n", path);
+}
+
 static void handle_line(const char *line)
 {
     char cmd[32] = "";
@@ -760,6 +787,8 @@ static void handle_line(const char *line)
         cmd_save_nav(args);
     } else if (!strcmp(cmd, "navadopt")) {
         cmd_navadopt(args);
+    } else if (!strcmp(cmd, "open")) {
+        cmd_open(args);
     } else if (!strcmp(cmd, "help")) {
         out_add("commands: ping | state | set x y z [r g b] | del x y z | "
                 "shape x y z [rise] [name] | undo | redo\n"
@@ -767,7 +796,8 @@ static void handle_line(const char *line)
                 "end=+Y|-.. id=<id> [source=..] [group=..] [label=..] "
                 "base=rev nbase=navrev | tags | confirm id=<id> base=rev "
                 "nbase=navrev | untag id=<id> base=rev nbase=navrev | "
-                "navsave [path=\"..\"|path=..] [base=rev] | navadopt path=.. | help\n"
+                "navsave [path=\"..\"|path=..] [base=rev] | navadopt path=.. | "
+                "open path=.. | help\n"
                 "geometry verbs accept base=<rev>; the semantic verbs (tag,\n"
                 "confirm, untag) require base=<rev> AND nbase=<navrev>, both\n"
                 "read from 'state' (rev / navrev lines); a stale or missing\n"
