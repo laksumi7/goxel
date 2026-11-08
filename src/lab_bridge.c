@@ -173,6 +173,8 @@ static void cmd_state(void)
     out_fmt("rev %u\nnavrev %llu\ntags %d\n", doc_rev(),
             (unsigned long long)nav_revision(), nav_count());
     out_fmt("painter_mode %d\n", goxel.painter.mode);
+    out_fmt("pickmode %d\n", tool_selection_get_pick());
+    out_fmt("ptr %d\n", nav_pointer_count());
     if (img->active_layer)
         out_fmt("active '%s' lid=%d shape=%d cells=%d\n",
                 img->active_layer->name, img->active_layer->id,
@@ -580,8 +582,28 @@ static void cmd_tag(const char *args)
     opt_get(args, "label", label, sizeof(label));
 
     axis_k = l->slope ? NAV_AT_SHAPE_END : NAV_AT_CELL;
-    r = nav_tag(id, kind, axis_k, token, group, label, token_err,
-                sizeof(token_err));
+    // rev9: cell=x,y,z anchors a cell record at an exact cell the Owner
+    // cannot box-select (e.g. a hinge pivot buried inside the body).
+    {
+        char celltok[32];
+        int celloc[3];
+        const int *override = NULL;
+        if (opt_get(args, "cell", celltok, sizeof(celltok))) {
+            if (axis_k == NAV_AT_SHAPE_END) {
+                out_add("err cell= is for cell anchors; the active layer is "
+                        "a shape, use end=\n");
+                return;
+            }
+            if (sscanf(celltok, "%d,%d,%d", &celloc[0], &celloc[1],
+                       &celloc[2]) != 3) {
+                out_fmt("err bad cell '%s' (use cell=x,y,z)\n", celltok);
+                return;
+            }
+            override = celloc;
+        }
+        r = nav_tag(id, kind, axis_k, token, override, group, label, token_err,
+                    sizeof(token_err));
+    }
     if (!r) { out_fmt("err %s\n", token_err); return; }
 
     // Report both geometric ends, and what the token resolved to, so the
@@ -742,6 +764,55 @@ static void cmd_open(const char *args)
     out_fmt("opened %s\nok\n", path);
 }
 
+// Worker pointer overlay (#541 A2, PM correction 2026-11-08): the Worker
+// points at cells without touching the Owner's native selection mask or the
+// geometry.  Attributed magenta cubes, session-only, cleared on open.
+static void cmd_pointer(const char *args)
+{
+    char sub[16] = "";
+    int x, y, z, i, p[3];
+
+    if (sscanf(args, "%15s", sub) != 1 || !strcmp(sub, "list")) {
+        out_fmt("ptr count=%d\n", nav_pointer_count());
+        for (i = 0; nav_pointer_get(i, p); i++)
+            out_fmt("ptr %d %d %d\n", p[0], p[1], p[2]);
+        out_add("ok\n");
+        return;
+    }
+    if (!strcmp(sub, "clear")) {
+        nav_pointer_clear();
+        out_add("ptr cleared\nok\n");
+        return;
+    }
+    if ((!strcmp(sub, "add") || !strcmp(sub, "del")) &&
+        sscanf(args + strlen(sub), " %d %d %d", &x, &y, &z) == 3) {
+        if (!strcmp(sub, "add")) {
+            nav_pointer_add(x, y, z);
+            out_fmt("ptr add %d %d %d count=%d\n", x, y, z,
+                    nav_pointer_count());
+        } else {
+            nav_pointer_del(x, y, z);
+            out_fmt("ptr del %d %d %d count=%d\n", x, y, z,
+                    nav_pointer_count());
+        }
+        out_add("ok\n");
+        return;
+    }
+    out_add("err usage: pointer [list] | add x y z | del x y z | clear\n");
+}
+
+static void cmd_pickmode(const char *args)
+{
+    if (!strcmp(args, "on")) tool_selection_set_pick(1);
+    else if (!strcmp(args, "off")) tool_selection_set_pick(0);
+    else if (*args && strcmp(args, "get")) {
+        out_add("err usage: pickmode on|off|get\n");
+        return;
+    }
+    out_fmt("pickmode %d\n", tool_selection_get_pick());
+    out_add("ok\n");
+}
+
 static void handle_line(const char *line)
 {
     char cmd[32] = "";
@@ -789,15 +860,20 @@ static void handle_line(const char *line)
         cmd_navadopt(args);
     } else if (!strcmp(cmd, "open")) {
         cmd_open(args);
+    } else if (!strcmp(cmd, "pointer")) {
+        cmd_pointer(args);
+    } else if (!strcmp(cmd, "pickmode")) {
+        cmd_pickmode(args);
     } else if (!strcmp(cmd, "help")) {
         out_add("commands: ping | state | set x y z [r g b] | del x y z | "
                 "shape x y z [rise] [name] | undo | redo\n"
                 "#541 navigator: selinfo | tag kind=muzzle|exhaust|pivot|hinge|rcs "
-                "end=+Y|-.. id=<id> [source=..] [group=..] [label=..] "
+                "end=+Y|-.. id=<id> [source=..] [group=..] [label=..] [cell=x,y,z] "
                 "base=rev nbase=navrev | tags | confirm id=<id> base=rev "
                 "nbase=navrev | untag id=<id> base=rev nbase=navrev | "
                 "navsave [path=\"..\"|path=..] [base=rev] | navadopt path=.. | "
-                "open path=.. | help\n"
+                "open path=.. | pointer [list]|add x y z|del x y z|clear | "
+                "pickmode on|off|get | help\n"
                 "geometry verbs accept base=<rev>; the semantic verbs (tag,\n"
                 "confirm, untag) require base=<rev> AND nbase=<navrev>, both\n"
                 "read from 'state' (rev / navrev lines); a stale or missing\n"

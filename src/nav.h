@@ -104,8 +104,11 @@ nav_record_t *nav_find(const char *id);
 // Create a DRAFT in the registry, or NULL on illegal arguments; `err` gets
 // the reason.  `token` selects the semantics: for shape-end records which end
 // of the shape axis (a world axis vector like "+Y" = {0,1,0}); for cell
-// records the marker direction itself.
+// records the marker direction itself.  `cell_override` (rev9) anchors a cell
+// record at an exact cell the Owner cannot box-select (e.g. a pivot buried
+// inside the body); the cell must still be occupied on the active layer.
 nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
+                      const int cell_override[3],
                       const char *group, const char *label, char *err,
                       size_t err_size);
 // Accept the current geometry as the meaning.  PM review #541 (3): this is a
@@ -203,6 +206,14 @@ bool nav_sha256_known_answer(void);
 
 void nav_gui(void);
 void nav_render(void);
+
+// Worker pointer overlay (#541 A2): attributed session-only cells set via
+// the lab bridge.  Never saved, never in undo, cleared on document switch.
+void nav_pointer_add(int x, int y, int z);
+void nav_pointer_del(int x, int y, int z);
+void nav_pointer_clear(void);
+int  nav_pointer_count(void);
+int  nav_pointer_get(int i, int out[3]);
 
 // Headless verification of every #541 P0 claim (fixtures/newed document),
 // returning 0 or the number of failed checks.  Driven by GOXEL_NAV_TEST.

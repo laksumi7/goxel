@@ -28,7 +28,22 @@ typedef struct {
     int     mode; // MODE_REPLACE | MODE_OVER | MODE_SUB
     int     current_mode; // The mode for the current box only.
 
+    bool    pick_mode; // Single-voxel pick mode (#541 A2, PM 2026-11-08).
+
 } tool_selection_t;
+
+// The one registered instance, so the lab bridge can drive pick mode.
+static tool_selection_t *s_selection_tool = NULL;
+
+void tool_selection_set_pick(int on)
+{
+    if (s_selection_tool) s_selection_tool->pick_mode = on ? true : false;
+}
+
+int tool_selection_get_pick(void)
+{
+    return s_selection_tool ? s_selection_tool->pick_mode : 0;
+}
 
 static void get_rect(const float pos[3], const float normal[3],
                      float out[4][4])
@@ -78,6 +93,67 @@ static int on_hover(gesture3d_t *gest)
 static int on_click(gesture3d_t *gest)
 {
     action_exec2(ACTION_reset_selection);
+    return 0;
+}
+
+// Count the cells currently in the selection mask (for the GUI readout).
+static int count_sel_cells(void)
+{
+    volume_iterator_t iter;
+    uint8_t c[4];
+    int p[3], n = 0;
+    if (!goxel.image || !goxel.image->selection_mask) return 0;
+    iter = volume_get_iterator(goxel.image->selection_mask,
+                               VOLUME_ITER_VOXELS | VOLUME_ITER_SKIP_EMPTY);
+    while (volume_iter(&iter, p)) {
+        volume_get_at(goxel.image->selection_mask, &iter, p, c);
+        if (c[3]) n++;
+    }
+    return n;
+}
+
+// Pick mode (#541 A2): one click selects the occupied voxel under the
+// cursor — the frontmost one along the view ray (occluded cells are not
+// reachable, same limitation as the paint pick).  Shift+click adds a
+// distinct cell, Ctrl+click removes one, so arbitrarily disconnected
+// multi-cell selections are possible.  The result lands in the same
+// selection_mask the box drag writes, so `selinfo` and every downstream
+// consumer read Owner picks exactly like box selections.
+static int on_pick(gesture3d_t *gest)
+{
+    image_t *img = goxel.image;
+    int p[3];
+    float fpos[3];
+    uint8_t on[4] = {255, 255, 255, 255};
+    uint8_t off[4] = {0, 0, 0, 0};
+
+    p[0] = roundf(gest->pos[0]);
+    p[1] = roundf(gest->pos[1]);
+    p[2] = roundf(gest->pos[2]);
+    vec3_set(fpos, p[0], p[1], p[2]);
+
+    if (img->selection_mask == NULL) img->selection_mask = volume_new();
+
+    if (gest->flags & GESTURE3D_FLAG_CTRL) {
+        volume_set_at(img->selection_mask, NULL, p, off);
+        image_history_push(img);
+        return 0;
+    }
+    if (!(gest->flags & GESTURE3D_FLAG_SHIFT)) {
+        // Plain click: explicit replace (mirrors the box tool's replace
+        // mode — the mode is visible in the GUI, never a silent erase).
+        volume_clear(img->selection_mask);
+        bbox_from_extents(img->selection_box, VEC(p[0], p[1], p[2]),
+                          .5, .5, .5);
+    } else if (box_is_null(img->selection_box)) {
+        bbox_from_extents(img->selection_box, VEC(p[0], p[1], p[2]),
+                          .5, .5, .5);
+    } else {
+        bbox_extends_from_points(img->selection_box, 1, &fpos,
+                                 img->selection_box);
+    }
+    volume_set_at(img->selection_mask, NULL, p, on);
+    image_history_push(img);
     return 0;
 }
 
@@ -138,6 +214,7 @@ static void init(tool_t *tool_)
     tool_selection_t *tool = (void*)tool_;
     tool->mode = MODE_REPLACE;
     tool->current_mode = MODE_REPLACE;
+    s_selection_tool = tool;
 }
 
 // XXX: this is very close to tool_shape_iter.
@@ -173,13 +250,27 @@ static int iter(tool_t *tool, const painter_t *painter,
         .name = "Selection Hover",
     });
 
-    goxel_gesture3d(&(gesture3d_t) {
-        .type = GESTURE3D_TYPE_CLICK,
-        .snap_mask = snap_mask | SNAP_SELECTION_OUT,
-        .callback = on_click,
-        .user = selection,
-        .name = "Selection Click",
-    });
+    if (selection->pick_mode) {
+        // Single-voxel pick: the click snaps to the frontmost occupied
+        // voxel instead of clearing the selection.  Box drag still works.
+        goxel_add_hint(HINT_LARGE, GLYPH_MOUSE_LMB,
+                       _("Pick voxel (Shift add, Ctrl remove)"));
+        goxel_gesture3d(&(gesture3d_t) {
+            .type = GESTURE3D_TYPE_CLICK,
+            .snap_mask = SNAP_VOLUME | SNAP_ROUNDED,
+            .callback = on_pick,
+            .user = selection,
+            .name = "Selection Pick",
+        });
+    } else {
+        goxel_gesture3d(&(gesture3d_t) {
+            .type = GESTURE3D_TYPE_CLICK,
+            .snap_mask = snap_mask | SNAP_SELECTION_OUT,
+            .callback = on_click,
+            .user = selection,
+            .name = "Selection Click",
+        });
+    }
 
     goxel_gesture3d(&(gesture3d_t) {
         .type = GESTURE3D_TYPE_DRAG,
@@ -205,6 +296,17 @@ static int gui(tool_t *tool_)
     int x, y, z, w, h, d;
     float (*box)[4][4] = &goxel.image->selection_box;
     bool deactivated = false;
+    int n_sel;
+
+    // Single-voxel pick mode (#541 A2): discoverable toggle, live cell
+    // count and an explicit Clear so selections are never silently lost.
+    gui_checkbox(_("Pick voxel"), &tool->pick_mode,
+                 _("Click picks the occupied voxel under the cursor; "
+                   "Shift+click adds, Ctrl+click removes."));
+    n_sel = count_sel_cells();
+    gui_text(_("Selected: %d cells"), n_sel);
+    if (n_sel && gui_button(_("Clear selection"), 0, 0))
+        action_exec2(ACTION_reset_selection);
 
     tool_gui_mask_mode(&tool->mode);
 

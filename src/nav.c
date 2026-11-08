@@ -280,6 +280,7 @@ static void nav_reset(void)
     DL_FOREACH_SAFE(s_records, r, tmp) nav_remove(r);
     s_count = 0;
     s_seq = 0;
+    nav_pointer_clear();
     s_navrev++;
 }
 
@@ -650,6 +651,7 @@ void nav_move_mirror_layer(layer_t *layer, int axis, const int aabb[2][3])
 // #### Creation ###########################################################
 
 nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
+                      const int cell_override[3],
                       const char *group, const char *label, char *err,
                       size_t err_size)
 {
@@ -678,7 +680,7 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
     l = goxel.image->active_layer;
     if (at == NAV_AT_SHAPE_END && !l->slope)
         FAIL("layer '%s' is not a shape layer", l->name);
-    if (at == NAV_AT_CELL &&
+    if (at == NAV_AT_CELL && !cell_override &&
         (!goxel.image->selection_mask ||
          !volume_get_bbox(goxel.image->selection_mask, aabb, false)))
         FAIL("no selection to anchor to");
@@ -733,6 +735,11 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
         // The anchor cell: the centre of the committed selection, literally
         // the cell the Owner pointed at (the selection includes its faces).
         int center[3];
+        if (cell_override) {
+            // rev9: exact cell given (buried pivots the Owner cannot select).
+            // Occupancy is still verified by nav_ring below.
+            for (i = 0; i < 3; i++) t.cell[i] = cell_override[i];
+        } else {
         for (i = 0; i < 3; i++)
             center[i] = (int)floorf((aabb[0][i] + aabb[1][i] + 1.f) / 2.f);
         // PM review #541 (8): the centre only counts when it is inside the
@@ -767,6 +774,7 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
             }
             if (!found) FAIL("no occupied cell in the selection to anchor to");
             for (i = 0; i < 3; i++) t.cell[i] = best[i];
+        }
         }
         vec3_set(tvec, (float)token[0], (float)token[1], (float)token[2]);
         if (fabsf(tvec[0]) + fabsf(tvec[1]) + fabsf(tvec[2]) < 0.5f)
@@ -1770,6 +1778,102 @@ static void arrow_diagram(nav_record_t *r)
     render_box(&goxel.rend, box, col, EFFECT_NO_DEPTH_TEST | EFFECT_UNLIT);
 }
 
+// #### Worker pointer overlay #############################################
+//
+// Attributed session-only cells the Worker points at through the lab bridge
+// (#541 A2, PM correction 2026-11-08). They never touch the Owner's native
+// selection mask, never enter the gox, and never enter undo history: a new
+// document clears them with the registry.
+
+typedef struct nav_ptr {
+    int p[3];
+    struct nav_ptr *prev, *next;
+} nav_ptr_t;
+
+static nav_ptr_t *s_ptrs = NULL;
+
+void nav_pointer_add(int x, int y, int z)
+{
+    nav_ptr_t *pt;
+    DL_FOREACH(s_ptrs, pt)
+        if (pt->p[0] == x && pt->p[1] == y && pt->p[2] == z) return;
+    pt = calloc(1, sizeof(*pt));
+    pt->p[0] = x; pt->p[1] = y; pt->p[2] = z;
+    DL_PREPEND(s_ptrs, pt);
+}
+
+void nav_pointer_del(int x, int y, int z)
+{
+    nav_ptr_t *pt, *tmp;
+    DL_FOREACH_SAFE(s_ptrs, pt, tmp) {
+        if (pt->p[0] == x && pt->p[1] == y && pt->p[2] == z) {
+            DL_DELETE(s_ptrs, pt);
+            free(pt);
+            return;
+        }
+    }
+}
+
+void nav_pointer_clear(void)
+{
+    nav_ptr_t *pt, *tmp;
+    DL_FOREACH_SAFE(s_ptrs, pt, tmp) {
+        DL_DELETE(s_ptrs, pt);
+        free(pt);
+    }
+    s_ptrs = NULL;
+}
+
+int nav_pointer_count(void)
+{
+    nav_ptr_t *pt;
+    int n = 0;
+    DL_FOREACH(s_ptrs, pt) n++;
+    return n;
+}
+
+int nav_pointer_get(int i, int out[3])
+{
+    nav_ptr_t *pt;
+    int n = 0;
+    DL_FOREACH(s_ptrs, pt) {
+        if (n == i) {
+            out[0] = pt->p[0]; out[1] = pt->p[1]; out[2] = pt->p[2];
+            return 1;
+        }
+        n++;
+    }
+    return 0;
+}
+
+static void pointer_render(void)
+{
+    nav_ptr_t *pt;
+    uint8_t col[4] = {255, 0, 255, 255};
+    float v[8][3], c[3];
+    static const int e[12][2] = {
+        {0, 1}, {1, 3}, {3, 2}, {2, 0}, {4, 5}, {5, 7},
+        {7, 6}, {6, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    int i;
+
+    if (!s_ptrs) return;
+    if (goxel.frame_count % 40 >= 26) col[3] = 160;
+    // Drawn as twelve thick lines: the render_box + NO_DEPTH_TEST path is
+    // unreliable in this renderer (the record arrow boxes never show),
+    // while render_line with NO_DEPTH_TEST is proven on-screen.
+    DL_FOREACH(s_ptrs, pt) {
+        vec3_set(c, pt->p[0] + 0.5f, pt->p[1] + 0.5f, pt->p[2] + 0.5f);
+        for (i = 0; i < 8; i++) {
+            v[i][0] = c[0] + ((i & 1) ? 0.62f : -0.62f);
+            v[i][1] = c[1] + ((i & 2) ? 0.62f : -0.62f);
+            v[i][2] = c[2] + ((i & 4) ? 0.62f : -0.62f);
+        }
+        for (i = 0; i < 12; i++)
+            render_line(&goxel.rend, v[e[i][0]], v[e[i][1]], col,
+                        EFFECT_NO_DEPTH_TEST | EFFECT_LINE_THICK);
+    }
+}
+
 void nav_render(void)
 {
     nav_record_t *r;
@@ -1777,6 +1881,7 @@ void nav_render(void)
     nav_check_document();
     nav_revalidate();
     DL_FOREACH(s_records, r) arrow_diagram(r);
+    pointer_render();
 }
 
 // #### GUI ################################################################

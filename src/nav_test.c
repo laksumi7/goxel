@@ -1624,6 +1624,49 @@ int nav_test_run(const char *fixture, const char *outdir)
         }
     }
 
+    // rev10 (#541 A2, PM correction 2026-11-08): the Worker pointer overlay
+    // — attributed session-only cells, never geometry, never the Owner mask.
+    {
+        int p[3];
+        nav_pointer_clear();
+        CHECK(nav_pointer_count() == 0, "rev10: pointers start empty");
+        nav_pointer_add(1, 2, 3);
+        nav_pointer_add(1, 2, 3);
+        CHECK(nav_pointer_count() == 1, "rev10: duplicate pointer ignored");
+        nav_pointer_add(4, 5, 6);
+        CHECK(nav_pointer_count() == 2, "rev10: two distinct pointers");
+        CHECK(nav_pointer_get(0, p) && p[0] == 4 && p[1] == 5 && p[2] == 6,
+              "rev10: pointer readback exact");
+        CHECK(!nav_pointer_get(2, p), "rev10: out-of-range pointer refused");
+        nav_pointer_del(1, 2, 3);
+        CHECK(nav_pointer_count() == 1 && nav_pointer_get(0, p) &&
+              p[0] == 4, "rev10: pointer delete is exact");
+        nav_pointer_clear();
+        CHECK(nav_pointer_count() == 0, "rev10: pointer clear");
+
+        bridge("pointer add 7 8 9");
+        CHECK(reply_has("ptr add 7 8 9 count=1"),
+              "rev10: bridge pointer add works");
+        bridge("pointer add 7 8 9");
+        bridge("pointer add -1 -2 -3");
+        bridge("pointer");
+        CHECK(reply_has("ptr count=2") && reply_has("ptr -1 -2 -3"),
+              "rev10: bridge pointer list is exact");
+        bridge("pointer del 7 8 9");
+        bridge("pointer");
+        CHECK(reply_has("ptr count=1"), "rev10: bridge pointer del works");
+        bridge("pointer clear");
+        bridge("pointer");
+        CHECK(reply_has("ptr count=0"), "rev10: bridge pointer clear works");
+
+        bridge("pickmode on");
+        CHECK(reply_has("pickmode 1") && tool_selection_get_pick(),
+              "rev10: bridge enables the single-voxel pick mode");
+        bridge("pickmode off");
+        CHECK(reply_has("pickmode 0") && !tool_selection_get_pick(),
+              "rev10: bridge disables the single-voxel pick mode");
+    }
+
     printf("nav test: all steps executed\n");
     fflush(stdout);
     printf("== nav test: %d checks, %d failed ==\n", s_checks, s_failed);
