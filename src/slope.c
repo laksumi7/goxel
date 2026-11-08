@@ -703,7 +703,12 @@ static uint32_t cells_hash_in_region(const layer_t *layer, const int aabb[2][3])
 // can both show it.  A shape is stale when the cells inside its region changed
 // after it was applied: the generated surface cannot follow individual cells,
 // so the surface is now the stale thing and has to say so.
-static bool slope_refresh_stale(layer_t *layer)
+//
+// AMFM #541 rev3 (R3-2): public.  The cached flag is only refreshed by the
+// shape's own edit paths, so a gate that publishes semantics (the navigator)
+// must be able to ask the source again right now instead of trusting the
+// cached answer.
+bool slope_refresh_stale(layer_t *layer)
 {
     uint32_t h;
     if (!layer || !layer->slope) return false;

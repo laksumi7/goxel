@@ -132,6 +132,13 @@ void slope_transform_aabb(const int src[2][3], const float mat[4][4], int out[2]
 // Returns 0, or 1 when the axis could not be represented after the transform.
 int slope_move_surface(layer_t *layer, const float mat[4][4]);
 
+// AMFM #541 rev3 (R3-2): recompute the layer's shape staleness from the live
+// source cells right now (and record it on the modifier).  The cached `stale`
+// flag is only refreshed by the shape's own edit paths; a gate that publishes
+// semantics asks the source afresh through this.  Hashes only the shape's own
+// layer, so it belongs on an action (confirm, publish), not on every frame.
+bool slope_refresh_stale(layer_t *layer);
+
 // True when the layer's shape region holds cells but the mask does not cover
 // all of them — a partial grab that must be flagged rather than silently
 // leaving part of the surface behind.

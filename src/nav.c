@@ -475,6 +475,18 @@ static bool nav_record_valid(const nav_record_t *r, char *why, size_t why_size)
     return true;
 }
 
+// PM rev3 R3-2: the cached `stale` flag is only refreshed by the shape's own
+// edit paths, so a gate that publishes must ask the source again right now.
+// Only ever called on an action (Confirm, publish) — never per frame — so
+// hashing the shape's own layer region here is affordable.
+static bool nav_fresh_valid(nav_record_t *r, char *why, size_t why_size)
+{
+    layer_t *l = nav_layer(r->layer_id);
+    if (r->at == NAV_AT_SHAPE_END && l && l->slope)
+        slope_refresh_stale(l);
+    return nav_record_valid(r, why, why_size);
+}
+
 void nav_revalidate(void)
 {
     nav_record_t *r;
@@ -637,7 +649,7 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
                       const char *group, const char *label, char *err,
                       size_t err_size)
 {
-    nav_record_t *r;
+    nav_record_t t, *r;
     layer_t *l;
     float u[3], tvec[3], d[3];
     int i, sign;
@@ -669,23 +681,25 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
     r = nav_find(id);
     if (r && r->status != NAV_STATUS_DRAFT)
         FAIL("id already confirmed");
-    if (!r) {
-        r = nav_alloc();
-        if (!r) FAIL("out of memory");
-    }
-    snprintf(r->id, sizeof(r->id), "%s", id);
-    nav_sanitize(r->group, sizeof(r->group), group ? group : "");
-    if (!r->group[0])
-        nav_sanitize(r->group, sizeof(r->group), l->name);
-    nav_sanitize(r->label, sizeof(r->label), label ? label : "");
-    r->kind = kind;
-    r->at = at;
-    r->layer_id = l->id;
-    r->status = NAV_STATUS_DRAFT;
-    r->reason[0] = 0;
-    r->pin_mismatch = false;
-    r->fp_kind = -1;          // a cell record carries no shape fingerprint
-    r->seq = ++s_seq;
+
+    // PM rev3 R3-1: everything is computed and checked into a temporary
+    // first.  A rejected tag must not create, change or confirm anything —
+    // the old code appended the draft before validating the axis token, so
+    // a failed request could leave a half-assigned draft that a later
+    // Confirm would publish as a wrong muzzle.
+    memset(&t, 0, sizeof(t));
+    t.fp_kind = -1;           // a cell record carries no shape fingerprint
+    snprintf(t.id, sizeof(t.id), "%s", id);
+    nav_sanitize(t.group, sizeof(t.group), group ? group : "");
+    if (!t.group[0])
+        nav_sanitize(t.group, sizeof(t.group), l->name);
+    nav_sanitize(t.label, sizeof(t.label), label ? label : "");
+    t.kind = kind;
+    t.at = at;
+    t.layer_id = l->id;
+    t.status = NAV_STATUS_DRAFT;
+    t.reason[0] = 0;
+    t.pin_mismatch = false;
 
     if (at == NAV_AT_SHAPE_END) {
         // "+Y" means: the end face whose outward normal points along +Y.
@@ -695,17 +709,19 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
         vec3_mul(u, (float)sign, d);
         if (fabsf(vec3_dot(d, tvec)) < 0.99f)
             FAIL("axis token is not parallel to this shape");
-        r->shape_sign = sign;
-        for (i = 0; i < 3; i++) r->cell[i] = 0;
+        t.shape_sign = sign;
+        for (i = 0; i < 3; i++) t.cell[i] = 0;
         // PM review #541 (4): capture the semantic attachment of this very
         // modifier so a later re-authoring cannot hide behind a green mark.
-        r->fp_kind = l->slope->kind;
-        r->fp_dir = l->slope->dir;
-        r->fp_closed = l->slope->closed;
-        r->fp_anchor = l->slope->anchor;
-        r->fp_rise = l->slope->rise;
+        t.fp_kind = l->slope->kind;
+        t.fp_dir = l->slope->dir;
+        t.fp_closed = l->slope->closed;
+        t.fp_anchor = l->slope->anchor;
+        t.fp_rise = l->slope->rise;
         for (i = 0; i < 3; i++)
-            r->fp_ext[i] = l->slope->aabb[1][i] - l->slope->aabb[0][i] + 1;
+            t.fp_ext[i] = l->slope->aabb[1][i] - l->slope->aabb[0][i] + 1;
+        if (!nav_ring(&t, NULL, NULL))
+            FAIL("the shape cannot carry this marker right now");
     } else {
         // The anchor cell: the centre of the committed selection, literally
         // the cell the Owner pointed at (the selection includes its faces).
@@ -716,10 +732,10 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
         // selection itself — an irregular or disconnected selection must not
         // anchor its marker on a cell nobody selected.
         if (volume_get_alpha_at(goxel.image->selection_mask, NULL, center)) {
-            for (i = 0; i < 3; i++) r->cell[i] = center[i];
+            for (i = 0; i < 3; i++) t.cell[i] = center[i];
         }
-        if (!volume_get_alpha_at(goxel.image->selection_mask, NULL, r->cell) ||
-            !volume_get_alpha_at(l->volume, NULL, r->cell)) {
+        if (!volume_get_alpha_at(goxel.image->selection_mask, NULL, t.cell) ||
+            !volume_get_alpha_at(l->volume, NULL, t.cell)) {
             volume_iterator_t sit;
             int sp[3];
             uint8_t sc[4];
@@ -743,20 +759,35 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
                 }
             }
             if (!found) FAIL("no occupied cell in the selection to anchor to");
-            for (i = 0; i < 3; i++) r->cell[i] = best[i];
+            for (i = 0; i < 3; i++) t.cell[i] = best[i];
         }
         vec3_set(tvec, (float)token[0], (float)token[1], (float)token[2]);
         if (fabsf(tvec[0]) + fabsf(tvec[1]) + fabsf(tvec[2]) < 0.5f)
             FAIL("bad direction");
         for (i = 0; i < 3; i++) {
-            r->dir[i] = (tvec[i] > 0.5f) ? 1.f : (tvec[i] < -0.5f) ? -1.f : 0.f;
-            r->cell0[i] = r->cell[i];
-            r->dir0[i] = r->dir[i];
+            t.dir[i] = (tvec[i] > 0.5f) ? 1.f : (tvec[i] < -0.5f) ? -1.f : 0.f;
+            t.cell0[i] = t.cell[i];
+            t.dir0[i] = t.dir[i];
         }
-        r->shape_sign = 0;
-        if (!nav_ring(r, NULL, NULL))
+        t.shape_sign = 0;
+        if (!nav_ring(&t, NULL, NULL))
             FAIL("anchor cell is empty on layer '%s'", l->name);
     }
+
+    // Every check passed: only now does the registry move (PM rev3 R3-1).
+    if (!r) {
+        r = nav_alloc();
+        if (!r) FAIL("out of memory");
+    }
+    {
+        struct nav_record *pv = r->prev, *nx = r->next;
+        bool mv = r->_moving;
+        *r = t;
+        r->prev = pv;
+        r->next = nx;
+        r->_moving = mv;
+    }
+    r->seq = ++s_seq;
     s_navrev++;               // the registry moved, even onto an old draft id
     *err = 0;
     return r;
@@ -771,8 +802,9 @@ bool nav_confirm(nav_record_t *rec, char *err, size_t err_size)
     // PM review #541 (3): Confirm is a publication gate, not a button that
     // blesses whatever is on screen.  The current authored geometry has to
     // support the meaning right now; a meaning that was invalidated needs a
-    // deliberate untag + tag re-anchor, never a second click.
-    if (!nav_record_valid(rec, why, sizeof(why))) {
+    // deliberate untag + tag re-anchor, never a second click.  PM rev3
+    // R3-2: the shape's source cells are asked afresh, not from the cache.
+    if (!nav_fresh_valid(rec, why, sizeof(why))) {
         snprintf(err, err_size, "record '%s' cannot be confirmed: %s; "
                  "untag and tag again to re-anchor", rec->id, why);
         return false;
@@ -1114,9 +1146,19 @@ int nav_adopt(const char *gox_path)
                     }
                 }
                 if (data_ok && pin_ok && !strcmp(status, "confirmed")) {
-                    r->status = NAV_STATUS_CONFIRMED;
-                    r->reason[0] = 0;
-                    count++;
+                    if (r->at == NAV_AT_SHAPE_END && r->fp_kind < 0) {
+                        // PM rev3 R3-4: a rev1 record carries no semantic
+                        // fingerprint, so re-authoring could never be caught
+                        // for it.  The meaning is kept, but only a deliberate
+                        // re-anchor can make it green again — never a silent
+                        // indefinite trust of a historical file.
+                        snprintf(r->reason, sizeof(r->reason),
+                                 "the sidecar predates fingerprints");
+                    } else {
+                        r->status = NAV_STATUS_CONFIRMED;
+                        r->reason[0] = 0;
+                        count++;
+                    }
                 }
             }
             brace = bend + 1;
@@ -1141,12 +1183,34 @@ int nav_adopt(const char *gox_path)
     return count;
 }
 
+// PM rev3 R3-3: gox_export cannot report a failed write (save_to_file is
+// void and the wrapper returns 0 unconditionally), so published bytes are
+// trusted only after they read back as a real gox: openable, right magic,
+// non-trivial size.  Returns true when the file looks like a gox.
+static bool nav_gox_reads_ok(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    char magic[4];
+    long sz;
+
+    if (!f) return false;
+    if (fread(magic, 1, 4, f) != 4 || strncmp(magic, "GOX ", 4) != 0) {
+        fclose(f);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    sz = ftell(f);
+    fclose(f);
+    return sz > 4;
+}
+
 int nav_save(const char *path, char *err, size_t err_size)
 {
     nav_record_t *r;
     uint8_t sha[32];
     char hex[65];
     char sidecar[600], tmp[640], base[256];
+    char cand[640], lg_gox[660], lg_side[680];
     char esc[1024], esc2[1024], esc3[2048], esc4[1024];
     FILE *f;
     int rc, total = 0, i = 0;
@@ -1157,7 +1221,13 @@ int nav_save(const char *path, char *err, size_t err_size)
     if (slope_session_is_open()) FAILS("a shape session is open");
     // PM review #541 (3): publication revalidates synchronously — a record
     // that went stale since the last frame cannot slip through into a pin.
+    // PM rev3 R3-2: shape records ask their source cells afresh, not from
+    // the cached flag, before anything is written.
     nav_revalidate();
+    DL_FOREACH(s_records, r) {
+        char why[96];
+        if (!nav_fresh_valid(r, why, sizeof(why))) nav_fail(r, why);
+    }
     DL_FOREACH(s_records, r) {
         total++;
         if (r->status != NAV_STATUS_CONFIRMED)
@@ -1167,14 +1237,50 @@ int nav_save(const char *path, char *err, size_t err_size)
     }
     if (!path || !*path) FAILS("no path");
 
-    rc = goxel_export_to_file((char *)path, "gox");
-    if (rc) FAILS("gox save failed (%d)", rc);
-    if (nav_sha256_file(path, sha)) FAILS("cannot hash the saved file");
+    // PM rev3 R3-3: never overwrite an approved pair with unverified bytes.
+    // The gox is exported to a candidate path and read back; only then does
+    // the previous pair move aside as .lastgood (a recoverable point) and
+    // the candidate move into place.  If any step fails, the original pair
+    // is untouched and says so.
+    snprintf(cand, sizeof(cand), "%s.new", path);
+    remove(cand);
+    rc = goxel_export_to_file(cand, "gox");
+    if (rc || !nav_gox_reads_ok(cand)) {
+        remove(cand);
+        FAILS("the gox export did not produce a readable file");
+    }
+    if (nav_sha256_file(cand, sha)) {
+        remove(cand);
+        FAILS("cannot hash the saved file");
+    }
     nav_sha256_hex(sha, hex);
     nav_sidecar_path(path, sidecar, sizeof(sidecar));
+    if (nav_gox_reads_ok(path)) {
+        // An existing pair: preserve it before replacing it.
+        snprintf(lg_gox, sizeof(lg_gox), "%s.lastgood", path);
+        snprintf(lg_side, sizeof(lg_side), "%s.lastgood", sidecar);
+        remove(lg_gox);
+        remove(lg_side);
+        if (rename(path, lg_gox) != 0) {
+            remove(cand);
+            FAILS("cannot preserve the previous gox as %s", lg_gox);
+        }
+        {
+            FILE *probe = fopen(sidecar, "rb");
+            if (probe) {
+                fclose(probe);
+                rename(sidecar, lg_side);
+            }
+        }
+    }
+    if (rename(cand, path) != 0) {
+        remove(cand);
+        FAILS("cannot move the gox into place; the previous pair is preserved");
+    }
     snprintf(tmp, sizeof(tmp), "%s.tmp", sidecar);
     f = fopen(tmp, "wb");
-    if (!f) FAILS("cannot write %s", tmp);
+    if (!f) FAILS("cannot write %s (the new gox is already in place; the "
+                  "previous pair is preserved as .lastgood)", tmp);
 
     // PM review #541 (5): every string is JSON-escaped; a Windows path with
     // backslashes or spaces publishes as valid JSON, not a broken file.

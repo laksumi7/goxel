@@ -101,6 +101,26 @@ static void read_revs(void)
     s_nrev = q ? strtoull(q + 7, NULL, 10) : 0;
 }
 
+// Deliberate re-anchor of a cell record against the active layer's current
+// selection: untag, tag again, confirm — the PM review #541 (3) contract.
+static void reanchor_cell(const char *id, const char *kind)
+{
+    char cmd[900];
+
+    read_revs();
+    snprintf(cmd, sizeof(cmd), "untag id=%s base=%u nbase=%llu", id, s_rev,
+             s_nrev);
+    bridge(cmd);
+    read_revs();
+    snprintf(cmd, sizeof(cmd), "tag kind=%s id=%s end=+Z group=pd base=%u "
+             "nbase=%llu", kind, id, s_rev, s_nrev);
+    bridge(cmd);
+    read_revs();
+    snprintf(cmd, sizeof(cmd), "confirm id=%s base=%u nbase=%llu", id, s_rev,
+             s_nrev);
+    bridge(cmd);
+}
+
 static layer_t *layer_by_kind(bool want_slope)
 {
     layer_t *l;
@@ -1107,11 +1127,235 @@ int nav_test_run(const char *fixture, const char *outdir)
             CHECK(body && volume_get_alpha_at(body->volume, NULL, after) != 0,
                   "PM2: and that cell really holds the mirrored voxel");
             bridge("undo");
+            // The undo rewinds geometry, never the registry (by design): the
+            // mirror moved the other body markers with the cells it just
+            // rewound, so each needs its deliberate re-anchor now.
+            body = body_layer_with_cells();
+            if (body) {
+                goxel.image->active_layer = body;
+                select_layer(body);
+                reanchor_cell("test_pivot", "pivot");
+                reanchor_cell("test_exhaust", "exhaust");
+            }
         }
         read_revs();
         snprintf(cmd, sizeof(cmd), "untag id=mirror_probe base=%u nbase=%llu",
                  s_rev, s_nrev);
         bridge(cmd);
+    }
+
+    // 12. PM rev3 R3-1: a failed tag must not touch the registry at all —
+    //     no half-assigned draft, no revision move, nothing to Confirm.
+    barrel = layer_by_kind(true);
+    if (barrel && barrel->slope) {
+        unsigned rev_a;
+        unsigned long long nrev_a;
+        goxel.image->active_layer = barrel;
+        read_revs();
+        rev_a = s_rev;
+        nrev_a = s_nrev;
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=bad_end end=+Z "
+                 "base=%u nbase=%llu", s_rev, s_nrev);
+        CHECK(call_fails(cmd) && reply_has("parallel"),
+              "R3-1: a tag with a non-parallel end is refused");
+        read_revs();
+        CHECK(s_rev == rev_a && s_nrev == nrev_a,
+              "R3-1: the refused tag moved neither the document nor the registry");
+        bridge("tags");
+        CHECK(!reply_has("bad_end"),
+              "R3-1: the refused tag left no record behind");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=bad_end base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        CHECK(call_fails(cmd) && reply_has("no record"),
+              "R3-1: there is nothing for Confirm to bless");
+        // an existing draft survives a failed re-tag untouched and still
+        // confirms with its original meaning
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=draft_keep end=%s "
+                 "base=%u nbase=%llu", end_tok, s_rev, s_nrev);
+        bridge(cmd);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=draft_keep end=+Z "
+                 "base=%u nbase=%llu", s_rev, s_nrev);
+        CHECK(call_fails(cmd), "R3-1: a failed re-tag of a draft id is refused");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=draft_keep base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        CHECK(reply_has("status=confirmed"),
+              "R3-1: the untouched draft still confirms");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "untag id=draft_keep base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+    }
+
+    // 13. PM rev3 R3-2: a source-cell edit under an INACTIVE authored shape
+    //     must block publication immediately — no shape GUI, no re-selecting
+    //     the layer, no waiting for the editor's own refresh paths.
+    barrel = layer_by_kind(true);
+    body = body_layer_with_cells();
+    if (barrel && barrel->slope && body) {
+        int bb[2][3];
+        uint8_t old[4], col[4] = { 200, 30, 30, 255 };
+        volume_get_bbox(barrel->volume, bb, true);   // exact: an occupied cell
+        volume_get_at(barrel->volume, NULL, bb[0], old);
+        volume_set_at(barrel->volume, NULL, bb[0], col);   // recolour the seed
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        CHECK(call_fails(cmd) && reply_has("source cells changed"),
+              "R3-2: an inactive shape's source edit blocks publication "
+              "without any shape GUI");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        CHECK(call_fails(cmd),
+              "R3-2: Confirm also refuses a muzzle whose source changed");
+        volume_set_at(barrel->volume, NULL, bb[0], old);   // restore the cell
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "untag id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        goxel.image->active_layer = barrel;
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "tag kind=muzzle id=test_muzzle end=%s "
+                 "group=pd base=%u nbase=%llu", end_tok, s_rev, s_nrev);
+        bridge(cmd);
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=test_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        bridge(cmd);
+        CHECK(reply_has("status=confirmed"),
+              "R3-2: with the source restored the muzzle re-anchors clean");
+    }
+
+    // 14. PM rev3 R3-3: republishing preserves the previous pair as
+    //     .lastgood; an export that cannot write reports failure and touches
+    //     nothing.
+    {
+        char lg[660], lgside[680], hex1[65], hex2[65];
+        uint8_t sha1[32];
+        FILE *pf;
+        nav_sha256_file(path, sha1);
+        nav_sha256_hex(sha1, hex1);
+        body = body_layer_with_cells();
+        goxel.image->active_layer = body;
+        bridge("set 6 6 6 20 20 20");
+        snprintf(cmd, sizeof(cmd), "navsave path=%s", path);
+        bridge(cmd);
+        CHECK(reply_has("saved") && reply_has("ok"),
+              "R3-3: republishing over an existing pair succeeds");
+        snprintf(lg, sizeof(lg), "%s.lastgood", path);
+        snprintf(lgside, sizeof(lgside), "%s.lastgood", sidecar);
+        pf = fopen(lg, "rb");
+        CHECK(pf != NULL, "R3-3: the previous gox is preserved as last-good");
+        if (pf) fclose(pf);
+        {
+            char text2[4096];
+            bool ok_lg = false, ok_new = false;
+            pf = fopen(lgside, "rb");
+            if (pf) {
+                size_t n = fread(text2, 1, sizeof(text2) - 1, pf);
+                fclose(pf);
+                text2[n] = 0;
+                ok_lg = strstr(text2, hex1) != NULL;
+            }
+            nav_sha256_file(path, sha1);
+            nav_sha256_hex(sha1, hex2);
+            pf = fopen(sidecar, "rb");
+            if (pf) {
+                size_t n = fread(text2, 1, sizeof(text2) - 1, pf);
+                fclose(pf);
+                text2[n] = 0;
+                ok_new = strcmp(hex1, hex2) != 0 && strstr(text2, hex2) != NULL;
+            }
+            CHECK(ok_lg, "R3-3: the last-good sidecar still pins the previous gox");
+            CHECK(ok_new, "R3-3: the new sidecar pins the new gox");
+        }
+        // A publish that cannot write must report failure and touch nothing.
+        nav_sha256_file(path, sha1);
+        nav_sha256_hex(sha1, hex1);
+        snprintf(cmd, sizeof(cmd), "navsave path=%s/no-such-dir/x.gox",
+                 outdir && *outdir ? outdir : ".");
+        CHECK(call_fails(cmd), "R3-3: an export that cannot write reports "
+              "failure instead of pretending success");
+        nav_sha256_file(path, sha1);
+        nav_sha256_hex(sha1, hex2);
+        CHECK(!strcmp(hex1, hex2),
+              "R3-3: the failed publish left the approved pair untouched");
+    }
+
+    // 15. PM rev3 R3-4: a rev1 sidecar (pin matches, no fingerprints at all)
+    //     keeps cell records green but holds shape records for re-anchor.
+    {
+        char oldgox[600], oldside[640], hex1[65], side_txt[2048];
+        uint8_t sha1[32];
+        int bb[2][3];
+        snprintf(oldgox, sizeof(oldgox), "%s/navtest_rev1.gox",
+                 outdir && *outdir ? outdir : ".");
+        copy_file(path, oldgox);
+        nav_sidecar_path(oldgox, oldside, sizeof(oldside));
+        nav_sha256_file(oldgox, sha1);
+        nav_sha256_hex(sha1, hex1);
+        body = body_layer_with_cells();
+        barrel = layer_by_kind(true);
+        {
+            // The first cell the layer actually occupies: a bbox corner can
+            // combine minima of different cells and be empty itself.
+            volume_iterator_t it;
+            uint8_t c[4];
+            it = volume_get_iterator(body->volume, VOLUME_ITER_VOXELS |
+                                                   VOLUME_ITER_SKIP_EMPTY);
+            bb[0][0] = bb[0][1] = bb[0][2] = 0;
+            while (volume_iter(&it, bb[0])) {
+                volume_get_at(body->volume, &it, bb[0], c);
+                if (c[3]) break;
+            }
+        }
+        snprintf(side_txt, sizeof(side_txt),
+            "{ \"format\": \"amfm.nav\", \"schema_version\": 1,\n"
+            " \"asset_id\": \"rev1\", \"source_gox\": \"x\",\n"
+            " \"source_sha256\": \"%s\", \"doc_key\": 0,\n"
+            " \"records\": [\n"
+            "  {\"id\": \"old_muzzle\", \"kind\": \"muzzle\", \"at\": \"shape_end\","
+            " \"layer_id\": %d, \"shape_sign\": 1, \"status\": \"confirmed\"},\n"
+            "  {\"id\": \"old_pivot\", \"kind\": \"pivot\", \"at\": \"cell\","
+            " \"layer_id\": %d, \"cell\": [%d, %d, %d], \"dir\": [0, 0, 1],"
+            " \"status\": \"confirmed\"}\n"
+            " ] }\n",
+            hex1, barrel ? barrel->id : 1, body->id, bb[0][0], bb[0][1], bb[0][2]);
+        write_text(oldside, side_txt);
+        snprintf(cmd, sizeof(cmd), "navadopt path=%s", oldgox);
+        bridge(cmd);
+        bridge("tags");
+        CHECK(reply_has("old_pivot") && reply_has("status=confirmed"),
+              "R3-4: rev1 cell records (no fingerprint needed) stay confirmed");
+        CHECK(reply_has("old_muzzle") && reply_has("predates fingerprints"),
+              "R3-4: rev1 shape records without a fingerprint are held for "
+              "re-anchor");
+        read_revs();
+        snprintf(cmd, sizeof(cmd), "confirm id=old_muzzle base=%u nbase=%llu",
+                 s_rev, s_nrev);
+        CHECK(call_fails(cmd) && reply_has("re-anchor"),
+              "R3-4: the fingerprint-less shape cannot be re-confirmed");
+        // and a shape change keeps it in review (the regression asked for)
+        if (barrel && barrel->slope) {
+            barrel->slope->rise += 0.01f;
+            barrel->slope->revision++;
+            nav_revalidate();
+            bridge("tags");
+            CHECK(reply_has("old_muzzle") && reply_has("status=needs_review"),
+                  "R3-4: a shape change keeps the fingerprint-less record in "
+                  "review");
+            barrel->slope->rise -= 0.01f;
+            barrel->slope->revision++;
+        }
+        // the current v2 sidecar still adopts green (v2 records preserved)
+        snprintf(cmd, sizeof(cmd), "navadopt path=%s", path);
+        bridge(cmd);
+        CHECK(reply_has("adopted 3"),
+              "R3-4: the current v2 sidecar still adopts green");
+        remove(oldgox);
+        remove(oldside);
     }
 
     printf("nav test: all steps executed\n");
