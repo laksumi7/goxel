@@ -659,8 +659,11 @@ nav_record_t *nav_tag(const char *id, int kind, int at, const int token[3],
 
     if (!goxel.image || !goxel.image->active_layer)
         FAIL("no document");
-    if (slope_session_is_open())
-        FAIL("a shape session is open");
+    // PM #541 GUI finding: picking a shape layer opens the editing strip by
+    // design, so a merely-open strip must not block tagging; only parameters
+    // the Owner has actually moved (or a shape still being created) may.
+    if (slope_session_is_dirty())
+        FAIL("a shape session has uncommitted edits");
     if (kind < 0 || kind >= NAV_KIND_COUNT || at < 0 || at >= NAV_AT_COUNT)
         FAIL("bad kind/at");
     if (!token) FAIL("no axis token");
@@ -1399,7 +1402,7 @@ int nav_save(const char *path, char *err, size_t err_size)
 #define FAILS(...) do { snprintf(err, err_size, ##__VA_ARGS__); return -1; } while (0)
 
     if (!goxel.image) FAILS("no document");
-    if (slope_session_is_open()) FAILS("a shape session is open");
+    if (slope_session_is_dirty()) FAILS("a shape session has uncommitted edits");
     // PM review #541 (3): publication revalidates synchronously — a record
     // that went stale since the last frame cannot slip through into a pin.
     // PM rev3 R3-2: shape records ask their source cells afresh, not from
@@ -1765,6 +1768,7 @@ void nav_gui(void)
     layer_t *l;
     float pos[3], dir[3];
     char err[128] = "";
+    char idbuf[96];
     int i = 0;
 
     if (!goxel.image) return;
@@ -1789,7 +1793,15 @@ void nav_gui(void)
         l = nav_layer(r->layer_id);
         gui_text("   on '%s'%s%s", l ? l->name : "(gone)",
                  r->reason[0] ? ": " : "", r->reason);
-        gui_group_begin("Owner decision");
+        // PM #541 GUI finding: every record used to render its Confirm/Reject
+        // buttons under the same group label, so ImGui saw duplicate item IDs
+        // once two records existed: the second record's buttons did nothing
+        // and the debug build threw a conflicting-ID warning on screen.  The
+        // group's ID scope must be unique per record; the visible caption is
+        // printed separately so the '##' trick stays invisible.
+        gui_text("Owner decision");
+        snprintf(idbuf, sizeof(idbuf), "##nav_%s", r->id);
+        gui_group_begin(idbuf);
         if (gui_button("Confirm", 0, 0)) {
             if (!nav_confirm(r, err, sizeof(err)))
                 printf("nav: confirm %s refused: %s\n", r->id, err);

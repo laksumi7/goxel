@@ -1484,6 +1484,26 @@ bool slope_session_is_open(void)
     return s.mode != S_MODE_NONE;
 }
 
+// AMFM #541 (GUI finding): picking a shape layer in the Layers panel opens the
+// editing strip by design, so "a session is open" says nothing about whether
+// anything is actually half-edited.  The navigator must still refuse over
+// uncommitted parameters, but it must not be blocked by a strip the Owner only
+// opened.  A new shape is always uncommitted; an editing session is dirty only
+// once a parameter or the region has actually moved from the session snapshot.
+bool slope_session_is_dirty(void)
+{
+    const slope_mod_t *m;
+
+    if (s.mode == S_MODE_NONE) return false;
+    if (s.mode != S_MODE_EDIT) return true;
+    m = s.mod_layer ? s.mod_layer->slope : NULL;
+    if (!m) return true;
+    if (m->kind != s.saved.kind || m->dir != s.saved.dir ||
+        m->anchor != s.saved.anchor || m->closed != s.saved.closed ||
+        m->rise != s.saved.rise) return true;
+    return memcmp(m->aabb, s.saved.aabb, sizeof(m->aabb)) != 0;
+}
+
 /*
  * Function: slope_apply_shape_at
  *

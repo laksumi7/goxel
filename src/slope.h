@@ -112,6 +112,12 @@ void slope_ensure_art_layer(void);
 // A3-P0) refuses to edit then, so it can never fight the manual flow.
 bool slope_session_is_open(void);
 
+// AMFM #541: true when an open shape session holds uncommitted parameters (a
+// new shape, or an edit whose parameters or region have moved since the strip
+// was opened).  A strip the Owner merely opened by picking the layer is not
+// dirty, so readers of committed geometry may proceed while it is showing.
+bool slope_session_is_dirty(void);
+
 // Round off one voxel as a closed cylinder through the normal authoring path
 // (select -> shape -> apply), so the edit is undoable and adds no voxels.
 // Used by the live bridge's `shape` verb.  Returns 0 or a negative refusal code.
