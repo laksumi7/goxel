@@ -3,8 +3,10 @@
 
 Authority is the saved GOX bytes: every occupied cell, its colour, the layer
 that owns it, the layer id, and every surface modifier come from the file.  The
-pinned table supplies only the four facts a .gox cannot hold today (group kind,
-group pivot, barrel ownership, markers) and is bound to the exact GOX hash.
+pinned table supplies only the facts a .gox cannot hold today (group kind,
+group pivot, joint parentage, markers with their authored directions, and the
+structured outlet/envelope geometry the #541 PM decisions require) and is bound
+to the exact GOX hash.
 
 It fails closed rather than guessing: a hash mismatch, an unclaimed or
 double-claimed layer, a pinned pivot that no longer matches the geometry, a
@@ -22,7 +24,7 @@ import sys
 
 import goxread
 
-MARKER_KINDS = {"pivot", "muzzle", "exhaust"}
+MARKER_KINDS = {"pivot", "muzzle", "exhaust", "nozzle"}
 SURFACE_KINDS = {"slope", "bevel", "cylinder", "sphere"}
 
 
@@ -98,7 +100,10 @@ def build(gox_path, table):
             if g["parent"] not in gid:
                 raise Fail(f"group {g['name']} names parent '{g['parent']}' "
                            f"which is not a group in this table")
-            out["parent_id"] = gid[g["parent"]]
+            # Emitted as a string: the #535 reader stringifies parent_id raw, and
+            # a JSON-parsed int arrives as a float ("4.0"), which would not match
+            # the group key ("4").  A string id survives both paths intact.
+            out["parent_id"] = str(gid[g["parent"]])
         if g.get("transform") is not None:
             t = g["transform"]
             fwd, up = t["forward_source"], t["up_source"]
@@ -171,8 +176,9 @@ def build(gox_path, table):
             raise Fail(f"unknown marker kind {m['kind']} on {m['id']}")
         if m["group_id"] not in gid:
             raise Fail(f"marker {m['id']} names group {m['group_id']} which does not exist")
-        if m["kind"] in ("muzzle", "exhaust") and not m.get("direction_xyz"):
-            raise Fail(f"marker {m['id']} is directional but has no direction_xyz")
+        if not m.get("direction_xyz"):
+            raise Fail(f"marker {m['id']} has no direction_xyz; the #535 reader "
+                       f"requires a non-zero direction on every marker")
         rec = {
             "id": m["id"],
             "group_id": gid[m["group_id"]],
@@ -190,6 +196,12 @@ def build(gox_path, table):
                 raise Fail(f"marker {m['id']} names source cell {list(sc)} which belongs "
                            f"to another group")
             rec["source_cell"] = list(sc)
+        # #541 PM decision (3): authored outlet/envelope geometry travels as
+        # structured fields, never as label text.  The current reader ignores
+        # unknown marker fields; #535 consumes them once its contract lands.
+        for extra in ("outlet_rect", "envelope"):
+            if extra in m:
+                rec[extra] = m[extra]
         out_markers.append(rec)
 
     doc = {
@@ -229,7 +241,7 @@ def validate(path, gox_path):
     if d["source_sha256"] != sha:
         problems.append("source_sha256 does not match the GOX on disk")
     gids = [g["id"] for g in d["groups"]]
-    have = set(gids)
+    have = set(gids) | {str(x) for x in gids}
     if len(set(gids)) != len(gids):
         problems.append("duplicate group ids")
     if len({g["name"] for g in d["groups"]}) != len(d["groups"]):
@@ -241,7 +253,7 @@ def validate(path, gox_path):
         if pid is not None:
             if pid not in have:
                 problems.append(f"group {g.get('name')} names parent {pid} which does not exist")
-            elif pid == g["id"]:
+            elif str(pid) == str(g["id"]):
                 problems.append(f"group {g.get('name')} is its own parent")
         t = g.get("transform")
         if t is not None:
@@ -274,12 +286,12 @@ def validate(path, gox_path):
             problems.append(f"marker {m['id']} names unknown group {m['group_id']}")
         if m["kind"] not in MARKER_KINDS:
             problems.append(f"marker {m['id']} kind {m['kind']} not in the contract")
-        if m["kind"] in ("muzzle", "exhaust") and not m.get("direction_xyz"):
+        if not m.get("direction_xyz"):
             problems.append(f"marker {m['id']} has no direction")
         sc = m.get("source_cell")
         if sc is not None and tuple(sc) not in src:
             problems.append(f"marker {m['id']} names source cell {sc} which is not occupied")
-    empty = have - {c["group_id"] for c in d["cells"]}
+    empty = set(gids) - {c["group_id"] for c in d["cells"]}
     if empty:
         problems.append(f"groups with no cells: {sorted(empty)}")
     return problems
