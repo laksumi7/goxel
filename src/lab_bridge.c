@@ -173,6 +173,7 @@ static void cmd_state(void)
     out_fmt("rev %u\nnavrev %llu\ntags %d\n", doc_rev(),
             (unsigned long long)nav_revision(), nav_count());
     out_fmt("painter_mode %d\n", goxel.painter.mode);
+    out_fmt("tool %s\n", goxel.tool ? goxel.tool->name : "-");
     out_fmt("pickmode %d\n", tool_selection_get_pick());
     out_fmt("ptr %d\n", nav_pointer_count());
     if (img->active_layer)

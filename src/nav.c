@@ -1932,24 +1932,31 @@ void nav_gui(void)
         l = nav_layer(r->layer_id);
         gui_text("   on '%s'%s%s", l ? l->name : "(gone)",
                  r->reason[0] ? ": " : "", r->reason);
+        // #541 rev10d (Owner complaint 2026-11-09): a freshly loaded file
+        // showed a wall of Confirm/Reject under every record, even the ones
+        // already accepted — it read as "something is broken".  A decision
+        // is only pending while the status is not confirmed, so the buttons
+        // render only then.
         // PM #541 GUI finding: every record used to render its Confirm/Reject
         // buttons under the same group label, so ImGui saw duplicate item IDs
         // once two records existed: the second record's buttons did nothing
         // and the debug build threw a conflicting-ID warning on screen.  The
         // group's ID scope must be unique per record; the visible caption is
         // printed separately so the '##' trick stays invisible.
-        gui_text("Owner decision");
-        snprintf(idbuf, sizeof(idbuf), "##nav_%s", r->id);
-        gui_group_begin(idbuf);
-        if (gui_button("Confirm", 0, 0)) {
-            if (!nav_confirm(r, err, sizeof(err)))
-                printf("nav: confirm %s refused: %s\n", r->id, err);
-            fflush(stdout);
-            err[0] = 0;
+        if (r->status != NAV_STATUS_CONFIRMED) {
+            gui_text("Owner decision");
+            snprintf(idbuf, sizeof(idbuf), "##nav_%s", r->id);
+            gui_group_begin(idbuf);
+            if (gui_button("Confirm", 0, 0)) {
+                if (!nav_confirm(r, err, sizeof(err)))
+                    printf("nav: confirm %s refused: %s\n", r->id, err);
+                fflush(stdout);
+                err[0] = 0;
+            }
+            if (gui_button("Reject", 0, 0))
+                nav_remove(r);
+            gui_group_end();
         }
-        if (gui_button("Reject", 0, 0))
-            nav_remove(r);
-        gui_group_end();
     }
     gui_window_end();
 }
