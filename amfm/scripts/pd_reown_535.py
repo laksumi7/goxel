@@ -29,7 +29,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, r"C:\projects_tools\goxel-lab\goxel\amfm\scripts")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import goxread  # noqa: E402
 
 PAD_GREY = (46, 46, 46)

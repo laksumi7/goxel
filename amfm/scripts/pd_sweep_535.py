@@ -23,17 +23,18 @@ It also proves the two things the Owner asked to see numerically:
 """
 import json
 import math
+import os
 import sys
 
-sys.path.insert(0, r'C:\projects_tools\goxel-lab\goxel\amfm\scripts')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import goxread
 
 GOX = sys.argv[1] if len(sys.argv) > 1 else \
-    r'Z:\data_art\Ref_SF\voxels\Star Marine Trooper\pd535\StarMarineTrooper_hollow_pd535_candidate.gox'
+    os.environ.get("AMFM_SRC_GOX", "candidate.gox")
 JOINTS = sys.argv[2] if len(sys.argv) > 2 else \
-    r'Z:/data_art/Ref_SF/voxels/Star Marine Trooper/pd535/pd535_joints.json'
+    os.environ.get("AMFM_PDJONTS", "pd535_joints.json")
 OUT = sys.argv[3] if len(sys.argv) > 3 else \
-    r'Z:\data_art\Ref_SF\voxels\Star Marine Trooper\pd535\pd535_sweep.json'
+    os.environ.get("AMFM_SWEEP_OUT", "pd535_sweep.json")
 YAWS = list(range(0, 360, 15))
 PITCHES = list(range(0, -181, -15))
 R = 8

@@ -11,11 +11,11 @@ import json
 import os
 import sys
 
-sys.path.insert(0, r"C:\projects_tools\goxel-lab\goxel\amfm\scripts")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import goxread  # noqa: E402
 
-SRC = r"Z:\data_art\Ref_SF\voxels\Star Marine Trooper\StarMarineTrooper_hollow.gox"
-OUT = r"C:\Users\laksu\AppData\Local\Temp\opencode\pd534"
+SRC = os.environ.get("AMFM_SRC_GOX", "ship.gox")
+OUT = os.environ.get("AMFM_OUT_DIR", "pd_joint_plan_out")
 if len(sys.argv) > 1:                     # --gox/--out: re-normalize a copy, same steps
     _ap = argparse.ArgumentParser()
     _ap.add_argument("--gox", default=SRC)
