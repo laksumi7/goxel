@@ -721,6 +721,34 @@ static void cmd_save_nav(const char *args)
     out_add("saved\nok\n");
 }
 
+// AMFM #541 rev10e: persist the live document to the path it was loaded from,
+// so a worker surgery can finish without the Owner pressing Ctrl+S.  Same
+// write path as File->Save (gox.c a_save): save_to_file + saved_key update +
+// sys_on_saved, so the title bar and the unsaved-changes guard stay correct.
+static void cmd_save(const char *args)
+{
+    char path[512] = "";
+
+    if (!goxel.image) { out_add("err no image\n"); return; }
+    if (!opt_get(args, "path", path, sizeof(path))) {
+        if (!goxel.image->path) {
+            out_add("err document has no path; pass path=<file.gox>\n");
+            return;
+        }
+        snprintf(path, sizeof(path), "%s", goxel.image->path);
+    }
+    if (!rev_check(args, NULL)) return;
+    if (!goxel.image->path || strcmp(path, goxel.image->path) != 0) {
+        free(goxel.image->path);
+        goxel.image->path = strdup(path);
+    }
+    save_to_file(goxel.image, goxel.image->path);
+    goxel.image->saved_key = image_get_key(goxel.image);
+    sys_on_saved(goxel.image->path);
+    out_fmt("save path='%s'\n", goxel.image->path);
+    out_add("ok\n");
+}
+
 static void cmd_navadopt(const char *args)
 {
     char path[512] = "";
@@ -1073,6 +1101,8 @@ static void handle_line(const char *line)
         cmd_tag_alive(args, false);
     } else if (!strcmp(cmd, "navsave")) {
         cmd_save_nav(args);
+    } else if (!strcmp(cmd, "save")) {
+        cmd_save(args);
     } else if (!strcmp(cmd, "navadopt")) {
         cmd_navadopt(args);
     } else if (!strcmp(cmd, "open")) {
@@ -1102,7 +1132,7 @@ static void handle_line(const char *line)
                 "end=+Y|-.. id=<id> [source=..] [group=..] [label=..] [cell=x,y,z] "
                 "base=rev nbase=navrev | tags | confirm id=<id> base=rev "
                 "nbase=navrev | untag id=<id> base=rev nbase=navrev | "
-                "navsave [path=\"..\"|path=..] [base=rev] | navadopt path=.. | "
+                "navsave [path=\"..\"|path=..] [base=rev] | save [path=..] [base=rev] | navadopt path=.. | "
                 "open path=.. | pointer [list]|add x y z|del x y z|clear | "
                 "pickmode on|off|get | dellayer name=..|id=..|prefix=.. | "
                 "find r g b | help\n"
