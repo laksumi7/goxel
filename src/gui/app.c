@@ -18,6 +18,7 @@
 
 #include "filters.h"
 #include "goxel.h"
+#include "nav.h"
 
 #include "../ext_src/stb/stb_ds.h"
 
@@ -290,6 +291,11 @@ void gui_app(void)
     goxel.pathtrace = goxel.pathtracer.status &&
         (goxel.gui.current_panel == PANEL_RENDER ||
          PANELS[PANEL_RENDER].detached);
+
+    // AMFM #534: contextual surface-modifier strip.
+    slope_gui();
+    // AMFM #541: the equipment navigator window (records + owner actions).
+    nav_gui();
 
     gui_view_cube(goxel.gui.viewport[2] - 128, item_height + 2, 128, 128);
 }

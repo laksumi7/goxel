@@ -117,7 +117,7 @@ if target_os == 'msys' or target_os == 'cygwin':
                          '-Wno-unused-function'])
     env.Append(CCFLAGS=['-Wno-error=address']) # To remove if possible.
     env.Append(LIBS=['glfw3', 'opengl32', 'z', 'tre', 'gdi32', 'Comdlg32',
-                     'ole32', 'uuid', 'shell32'],
+                     'ole32', 'uuid', 'shell32', 'ws2_32'],
                LINKFLAGS='--static')
     sources += glob.glob('ext_src/glew/glew.c')
     sources.append('ext_src/nfd/nfd_win.cpp')

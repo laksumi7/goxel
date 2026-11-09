@@ -42,6 +42,7 @@ enum {
     KEY_LEFT_ALT = 342,
     KEY_RIGHT_SHIFT = 344,
     KEY_RIGHT_CONTROL = 345,
+    KEY_RIGHT_ALT = 346,
 };
 
 // A finger touch or mouse click state.

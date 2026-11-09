@@ -89,4 +89,8 @@ int tool_gui_radius(void);
 int tool_gui_smoothness(void);
 int tool_gui_color(void);
 
+// Selection tool single-voxel pick mode (#541 A2), driven by the lab bridge.
+void tool_selection_set_pick(int on);
+int  tool_selection_get_pick(void);
+
 #endif // TOOLS_H

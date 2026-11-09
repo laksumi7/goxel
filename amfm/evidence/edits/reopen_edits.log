@@ -1,0 +1,9 @@
+0.000: Register script FillRandom                                   js_goxel_registerScript (src/script.c:719)
+0.000: Register script Dilate                                       js_goxel_registerScript (src/script.c:719)
+0.000: Register script VoxelSphere                                  js_goxel_registerScript (src/script.c:719)
+0.000: Loading scripts from C:\Users\laksu\AppData\Roaming\Goxel\/scripts
+ on_dir (src/script.c:922)
+[33;31m0.003: Cannot open C:\Users\laksu\AppData\Roaming\Goxel\/recent-files.txt: No such file or directory[m goxel_load_recent_files (src/goxel.c:432)
+0.003: Read settings file: C:\Users\laksu\AppData\Roaming\Goxel\/settings.ini settings_load (src/gui/settings.c:280)
+0.013: OpenGL version: 4.6.0 NVIDIA 595.79                          render_init (src/render.c:309)
+0.013: OpenGL renderer: NVIDIA GeForce RTX 4080 Laptop GPU/PCIe/SSE2 render_init (src/render.c:310)

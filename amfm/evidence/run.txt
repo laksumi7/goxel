@@ -1,0 +1,33 @@
+AMFM #534 verification run: 2026년 11월  5일 목 오전 11:07:19
+goxel commit: 33be5c8ed826105ab35746f893065e9ef00d3134 (v0.15.1-61-g33be5c8e)
+gcc: gcc.exe (Rev6, Built by MSYS2 project) 16.2.0
+vox1.vox sha256: 3625ec92410af2d36edc387f33576b7d4778cbd68641792ce4dfa8d288a4b9a1
+build exit=0
+selftest exit=0 pass=15 fail=0
+demo exit=0
+reopen exit=0
+demo region: [-64 -34 -25]..[-44 34 18] rise 38.0
+demo: saved C:/projects_tools/goxel-lab/evidence/reopen.gox
+layer 0: name='Layer.1' cells=136447 slope=no
+layer 1: name='Slope 1' cells=11936 slope=yes
+합계 1341
+drwxr-xr-x 1 laksu laksu      0 11월  5 11:07 .
+drwxr-xr-x 1 laksu laksu      0 11월  5 11:07 ..
+-rw-r--r-- 1 laksu laksu  61283 11월  5 09:50 01_slope_created.png
+-rw-r--r-- 1 laksu laksu  56141 11월  5 09:50 02_slope_adjusted.png
+-rw-r--r-- 1 laksu laksu  59985 11월  5 09:50 03_slope_applied.png
+-rw-r--r-- 1 laksu laksu   1518 11월  5 11:07 demo.log
+-rw-r--r-- 1 laksu laksu    672 11월  5 09:50 demo_out.txt
+-rw-r--r-- 1 laksu laksu 356496 11월  5 11:07 frame060.png
+-rw-r--r-- 1 laksu laksu  75322 11월  5 11:07 frame200.png
+-rw-r--r-- 1 laksu laksu 300588 11월  5 11:07 frame340.png
+-rw-r--r-- 1 laksu laksu      0 11월  5 09:49 gui_err.txt
+-rw-r--r-- 1 laksu laksu    913 11월  5 09:49 gui_out.txt
+-rw-r--r-- 1 laksu laksu  56864 11월  5 11:07 reopen.gox
+-rw-r--r-- 1 laksu laksu    913 11월  5 11:07 reopen.log
+-rw-r--r-- 1 laksu laksu 300574 11월  5 11:07 reopened.png
+-rw-r--r-- 1 laksu laksu    551 11월  5 11:07 run.txt
+-rw-r--r-- 1 laksu laksu      0 11월  5 09:50 run_err.txt
+-rw-r--r-- 1 laksu laksu    913 11월  5 09:50 run_log.txt
+-rw-r--r-- 1 laksu laksu  53862 11월  5 11:07 selftest.gox
+-rw-r--r-- 1 laksu laksu   1892 11월  5 11:07 selftest.log

@@ -1,0 +1,22 @@
+0.000: Register script FillRandom                                   js_goxel_registerScript (src/script.c:719)
+0.000: Register script Dilate                                       js_goxel_registerScript (src/script.c:719)
+0.000: Register script VoxelSphere                                  js_goxel_registerScript (src/script.c:719)
+0.000: Loading scripts from C:\Users\laksu\AppData\Roaming\Goxel\/scripts
+ on_dir (src/script.c:922)
+[33;31m0.003: Cannot open C:\Users\laksu\AppData\Roaming\Goxel\/recent-files.txt: No such file or directory[m goxel_load_recent_files (src/goxel.c:432)
+0.003: Read settings file: C:\Users\laksu\AppData\Roaming\Goxel\/settings.ini settings_load (src/gui/settings.c:280)
+0.018: OpenGL version: 4.6.0 NVIDIA 595.79                          render_init (src/render.c:309)
+0.018: OpenGL renderer: NVIDIA GeForce RTX 4080 Laptop GPU/PCIe/SSE2 render_init (src/render.c:310)
+edit demo: layer 'Slope 1' region [-64 -24 -20]..[-46 23 -1] cells=10092
+slope: wrote C:/projects_tools/goxel-lab/evidence/edits/edit0.png
+edit demo: deleted [-48 -16 -20] inside the region -> cells=10091 stale=1
+slope: wrote C:/projects_tools/goxel-lab/evidence/edits/edit1.png
+edit demo: recoloured [-47 -16 -20] inside the region -> cells=10091 stale=1
+slope: wrote C:/projects_tools/goxel-lab/evidence/edits/edit2.png
+edit demo: Restore cells -> the source voxels come back (10091 cells)
+slope: wrote C:/projects_tools/goxel-lab/evidence/edits/edit3.png
+0.275: Save to C:/projects_tools/goxel-lab/evidence/edits/edits.gox save_to_file (src/formats/gox.c:259)
+0.299: Saved C:/projects_tools/goxel-lab/evidence/edits/edits.gox   sys_on_saved (src/system.c:312)
+edits: save C:/projects_tools/goxel-lab/evidence/edits/edits.gox -> 0
+layer 0: name='Layer.1' cells=138291 shape=-
+layer 1: name='Slope 1' cells=10091 shape=-

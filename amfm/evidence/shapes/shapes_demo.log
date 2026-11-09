@@ -1,0 +1,25 @@
+0.000: Register script FillRandom                                   js_goxel_registerScript (src/script.c:719)
+0.000: Register script Dilate                                       js_goxel_registerScript (src/script.c:719)
+0.000: Register script VoxelSphere                                  js_goxel_registerScript (src/script.c:719)
+0.000: Loading scripts from C:\Users\laksu\AppData\Roaming\Goxel\/scripts
+ on_dir (src/script.c:922)
+[33;31m0.003: Cannot open C:\Users\laksu\AppData\Roaming\Goxel\/recent-files.txt: No such file or directory[m goxel_load_recent_files (src/goxel.c:432)
+0.003: Read settings file: C:\Users\laksu\AppData\Roaming\Goxel\/settings.ini settings_load (src/gui/settings.c:280)
+0.017: OpenGL version: 4.6.0 NVIDIA 595.79                          render_init (src/render.c:309)
+0.017: OpenGL renderer: NVIDIA GeForce RTX 4080 Laptop GPU/PCIe/SSE2 render_init (src/render.c:310)
+shape 0 (Slope): region [-64 -34 -25]..[-40 34 18] rise 20.00
+slope: wrote C:/projects_tools/goxel-lab/evidence/shapes/shape0.png
+shape 1 (Bevel): region [40 -34 -25]..[64 34 18] rise 6.00
+slope: wrote C:/projects_tools/goxel-lab/evidence/shapes/shape1.png
+shape 2 (Cylinder): region [-39 -34 -25]..[-15 34 18] rise 28.00
+slope: wrote C:/projects_tools/goxel-lab/evidence/shapes/shape2.png
+shape 3 (Sphere): region [14 -34 -25]..[39 34 18] rise 43.00
+slope: wrote C:/projects_tools/goxel-lab/evidence/shapes/shape3.png
+0.555: Save to C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox save_to_file (src/formats/gox.c:259)
+0.604: Saved C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox sys_on_saved (src/system.c:312)
+shapes: save C:/projects_tools/goxel-lab/evidence/shapes/shapes.gox -> 0
+layer 0: name='Layer.1' cells=36111 shape=- rise=0.00
+layer 1: name='Slope 1' cells=15800 shape=Slope rise=20.00
+layer 2: name='Bevel 2' cells=28956 shape=Bevel rise=6.00
+layer 3: name='Cylinder 3' cells=28462 shape=Cylinder rise=28.00
+layer 4: name='Sphere 4' cells=39054 shape=Sphere rise=43.00

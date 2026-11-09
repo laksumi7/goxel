@@ -17,6 +17,7 @@
  */
 
 #include "goxel.h"
+#include "nav.h"
 
 static const uint8_t ORIGIN_COLOR[4] = { 255, 0, 0, 255 };
 
@@ -24,8 +25,7 @@ typedef struct {
     tool_t tool;
 
     uint64_t start_mask_key;
-    volume_t *start_volume;
-    volume_t *start_selection;
+    image_move_t *mv;
     float box[4][4];
     float start_box[4][4];
     float start_mat[4][4];
@@ -70,6 +70,11 @@ static void move(layer_t *layer, const float mat[4][4])
         // Only apply translation to the layer->mat.
         vec3_add(layer->mat[3], mat[3], layer->mat[3]);
         volume_move(layer->volume, m);
+        // AMFM #534 P0: the generated surface is built in world cells, so it
+        // has to be translated with the voxels or it is left behind.
+        slope_move_surface(layer, m);
+        // AMFM #541: the nav records anchored on this layer move with it.
+        nav_move_delta_layer(layer, m);
         if (!box_is_null(layer->box)) {
             mat4_mul(m, layer->box, layer->box);
             box_get_bbox(layer->box, layer->box);
@@ -100,9 +105,7 @@ static int iter_selection(tool_move_t *tool, const painter_t *painter,
     float transf_tot[4][4];
     int box_edit_state;
     image_t *img = goxel.image;
-    layer_t *layer = img->active_layer;
     volume_t *mask = img->selection_mask;
-    volume_t *tmp;
 
     if (tool->start_mask_key != volume_get_key(mask)) {
         volume_get_box(mask, true, tool->box);
@@ -113,27 +116,23 @@ static int iter_selection(tool_move_t *tool, const painter_t *painter,
     if (!box_edit_state) return 0;
 
     if (box_edit_state == GESTURE3D_STATE_BEGIN) {
-        assert(!tool->start_volume && !tool->start_selection);
+        assert(!tool->mv);
         mat4_copy(tool->box, tool->start_box);
-        tool->start_volume = volume_copy(layer->volume);
-        volume_merge(tool->start_volume, mask, MODE_SUB, NULL);
-        tool->start_selection = volume_copy(layer->volume);
-        volume_merge(tool->start_selection, mask, MODE_INTERSECT, NULL);
+        // Snapshot every layer holding selected cells, not just the active
+        // one: an assembly may span the body layer and its generated-surface
+        // layers, and they must travel together.
+        tool->mv = image_move_begin(img, mask);
     }
 
-    mat4_mul(transf, tool->box, tool->box);
     get_transf(tool->start_box, tool->box, transf_tot);
-    tmp = volume_copy(tool->start_selection);
-    volume_move(tmp, transf_tot);
-    volume_set(layer->volume, tool->start_volume);
-    volume_merge(layer->volume, tmp, MODE_OVER, NULL);
-    volume_delete(tmp);
+    image_move_apply(tool->mv, transf_tot);
 
     if (box_edit_state == GESTURE3D_STATE_END) {
-        volume_delete(tool->start_volume);
-        volume_delete(tool->start_selection);
-        tool->start_volume = NULL;
-        tool->start_selection = NULL;
+        if (image_move_partial(tool->mv))
+            goxel_add_hint(0, NULL, "A shape was only partly selected; the whole "
+                                    "shape moved with it.");
+        image_move_end(tool->mv);
+        tool->mv = NULL;
         tool->box[3][3] = 0;
         volume_move(mask, transf_tot);
         image_history_push(goxel.image);

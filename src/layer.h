@@ -22,6 +22,7 @@
 #include "material.h"
 #include "volume.h"
 #include "shape.h"
+#include "slope.h"
 #include "utils/texture.h"
 
 typedef struct layer layer_t;
@@ -46,6 +47,8 @@ struct layer {
     const shape_t *shape;
     uint32_t    shape_key;
     uint8_t     color[4];
+    // AMFM #534: selective surface modifier (NULL when the layer has none).
+    slope_mod_t *slope;
 };
 
 layer_t *layer_new(const char *name);
